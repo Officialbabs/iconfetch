@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run IconFetch from wherever this checkout lives.
+here="$(dirname "$(readlink -f "$0")")"
+PYTHONPATH="$here/..${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m iconfetch "$@"

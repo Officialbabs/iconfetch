@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=IconFetch
+GenericName=App Icon Fixer
+Comment=Give installed apps their real icons, applied right away
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=Utility;Settings;DesktopSettings;
+Keywords=icon;icons;dock;launcher;flathub;app;
+StartupWMClass=io.iconfetch.IconFetch
+StartupNotify=true
