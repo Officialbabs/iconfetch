@@ -52,7 +52,7 @@ iconfetch revert        # put every original icon back (or: iconfetch revert vlc
 ./install.sh --uninstall  # reverts everything, then removes IconFetch
 ```
 
-Needs Python 3 with PyGObject, GTK 4 and libadwaita (already on Ada).
+Needs Python 3 with PyGObject, GTK 4 and libadwaita.
 
 ## Tests
 
