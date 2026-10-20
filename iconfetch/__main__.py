@@ -4,6 +4,7 @@
   iconfetch list            show every app, its icon and what IconFetch found
   iconfetch apply [ID…]     apply the suggested icons (or the best find for each ID)
   iconfetch revert [ID…]    put back the original icons (all of IconFetch's changes without IDs)
+  iconfetch refresh         catch up with app updates and removals (runs by itself after installs)
 """
 
 from __future__ import annotations
@@ -66,6 +67,14 @@ def cmd_apply(args) -> int:
     return 0
 
 
+def cmd_refresh(args) -> int:
+    from .install import SYNC_TEXT, sync
+
+    for name, kind in sync():
+        print(f"{name}: {SYNC_TEXT[kind]}")
+    return 0
+
+
 def cmd_revert(args) -> int:
     from .apps import installed_apps
     from .install import revert
@@ -91,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         ("list", cmd_list, "show apps and the icons found for them"),
         ("apply", cmd_apply, "apply suggested icons, or the best find for the given app IDs"),
         ("revert", cmd_revert, "put original icons back"),
+        ("refresh", cmd_refresh, "catch up with app updates and removals"),
     ):
         sub = commands.add_parser(name, help=text)
         sub.add_argument("ids", nargs="*", metavar="ID", help="desktop ID, e.g. firefox_firefox")

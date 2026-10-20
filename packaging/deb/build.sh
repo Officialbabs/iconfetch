@@ -12,6 +12,7 @@ umask 022
 sh "$root/install.sh" --prefix /usr --destdir "$stage" --no-deps >/dev/null
 mkdir -p "$stage/usr/share/doc/iconfetch" "$stage/DEBIAN"
 cp "$root/LICENSE" "$stage/usr/share/doc/iconfetch/copyright"
+echo /etc/xdg/autostart/io.iconfetch.IconFetch.Refresh.desktop >"$stage/DEBIAN/conffiles"
 size=$(du -sk "$stage/usr" | cut -f1)
 
 cat >"$stage/DEBIAN/control" <<EOF

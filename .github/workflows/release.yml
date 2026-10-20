@@ -55,7 +55,7 @@ jobs:
       - name: Install each package on its distribution
         run: |
           # The package's dependencies must be enough for the window and the icon decoding to load.
-          check='iconfetch --version && test -f /usr/share/applications/io.iconfetch.IconFetch.desktop && PYTHONPATH=/usr/lib/iconfetch python3 -c "import iconfetch.ui, iconfetch.sources"'
+          check='iconfetch --version && test -f /usr/share/applications/io.iconfetch.IconFetch.desktop && test -f /usr/lib/systemd/user/iconfetch-refresh.path && iconfetch refresh && PYTHONPATH=/usr/lib/iconfetch python3 -c "import iconfetch.ui, iconfetch.sources"'
           docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:22.04 sh -c \
             "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /dist/iconfetch_${VERSION}_all.deb >/dev/null && $check"
           docker run --rm -v "$PWD/dist:/dist:ro" debian:12 sh -c \

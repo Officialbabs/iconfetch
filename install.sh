@@ -6,12 +6,15 @@
 # Installs what IconFetch needs (Python 3, PyGObject, GTK 4, libadwaita) with
 # the system's package manager, asking first, then IconFetch for the current
 # user: ~/.local/lib/iconfetch, ~/.local/bin/iconfetch and an app menu entry.
+# It also keeps IconFetch's changes in step with app installs, updates and
+# removals in the background (a systemd user service, or a sign-in entry).
 # Run it again to update.
 #
 #   --uninstall     put back every icon IconFetch changed, then remove it
 #   --yes           install system packages without asking
 #   --no-deps       leave system packages alone
 #   --ref REF       install this tag, branch or commit (default: the latest release)
+#   --no-watch      no background refresh (IconFetch still catches up when opened)
 #   --link          from a checkout: run the checkout itself, for development
 #   --prefix DIR    install under DIR, e.g. /usr (packaging; names the icon by theme)
 #   --destdir DIR   stage the files under DIR (packaging)
@@ -21,7 +24,7 @@ umask 022  # files 644, folders 755, whoever runs it
 REPO="Officialbabs/iconfetch"
 APP_ID="io.iconfetch.IconFetch"
 
-user=1 deps=1 yes=0 uninstall=0 link=0 ref="" destdir="" prefix="${HOME:-}/.local"
+user=1 deps=1 yes=0 uninstall=0 link=0 watch=1 ref="" destdir="" prefix="${HOME:-}/.local"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'iconfetch: %s\n' "$*" >&2; exit 1; }
@@ -33,13 +36,14 @@ while [ $# -gt 0 ]; do
         --yes | -y) yes=1 ;;
         --no-deps) deps=0 ;;
         --link) link=1 ;;
+        --no-watch) watch=0 ;;
         --ref) [ $# -gt 1 ] || die "--ref needs a value"; ref="$2"; shift ;;
         --ref=*) ref="${1#*=}" ;;
         --prefix) [ $# -gt 1 ] || die "--prefix needs a value"; prefix="$2"; user=0; shift ;;
         --prefix=*) prefix="${1#*=}"; user=0 ;;
         --destdir) [ $# -gt 1 ] || die "--destdir needs a value"; destdir="$2"; shift ;;
         --destdir=*) destdir="${1#*=}" ;;
-        -h | --help) sed -n '2,18s/^# \{0,1\}//p' "$0" 2>/dev/null || say "See https://github.com/$REPO"; exit 0 ;;
+        -h | --help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" 2>/dev/null || say "See https://github.com/$REPO"; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
     shift
@@ -48,6 +52,7 @@ done
 [ -n "$prefix" ] && [ "$prefix" != "/.local" ] || die "HOME isn't set; pass --prefix"
 lib="$prefix/lib/iconfetch"
 bin="$prefix/bin"
+config="${XDG_CONFIG_HOME:-${HOME:-}/.config}"
 if [ "$user" = 1 ]; then
     share="${XDG_DATA_HOME:-$prefix/share}"
 else
@@ -243,7 +248,81 @@ EOF
     refresh_caches
 }
 
+user_systemd() {
+    have systemctl && systemctl --user show-environment >/dev/null 2>&1
+}
+
+# Keeps IconFetch's copies in step with app installs, updates and removals
+# without it being opened: a systemd user service run by changes to the app
+# folders and at sign-in, or else a sign-in entry.
+install_refresh() {
+    service=$(sed "s|@EXEC@|$bin/iconfetch|" "$src/data/iconfetch-refresh.service.in")
+    autostart=$(sed -e "s|@EXEC@|$bin/iconfetch|" -e "s|@ICON@|$APP_ID|" "$src/data/$APP_ID.Refresh.desktop.in")
+    if [ "$user" = 0 ]; then
+        # Packages ship both; a person turns on the instant one with systemctl --user enable --now.
+        mkdir -p "$D$prefix/lib/systemd/user" "$D/etc/xdg/autostart"
+        printf '%s\n' "$service" >"$D$prefix/lib/systemd/user/iconfetch-refresh.service"
+        cp "$src/data/iconfetch-refresh.path" "$D$prefix/lib/systemd/user/"
+        printf '%s\n' "$autostart" >"$D/etc/xdg/autostart/$APP_ID.Refresh.desktop"
+        return
+    fi
+    [ "$watch" = 1 ] && [ -z "$D" ] || return 0
+    if user_systemd; then
+        mkdir -p "$config/systemd/user"
+        printf '%s\n' "$service" >"$config/systemd/user/iconfetch-refresh.service"
+        path_unit >"$config/systemd/user/iconfetch-refresh.path"
+        rm -f "$config/autostart/$APP_ID.Refresh.desktop"
+        systemctl --user daemon-reload
+        if systemctl --user enable iconfetch-refresh.service >/dev/null 2>&1; then
+            watching="each time you sign in"
+        fi
+        if systemctl --user enable --now iconfetch-refresh.path >/dev/null 2>&1; then
+            watching="as soon as apps are installed, updated or removed"
+        elif [ "$(systemctl --user show -p Result --value iconfetch-refresh.path 2>/dev/null)" = resources ]; then
+            limit=$(cat /proc/sys/fs/inotify/max_user_instances 2>/dev/null || echo "?")
+            say "The instant refresh couldn't start: this session has used up its file watches"
+            say "(fs.inotify.max_user_instances is $limit). To raise the limit, then start it:"
+            say "  echo 'fs.inotify.max_user_instances = 1024' | sudo tee /etc/sysctl.d/60-inotify.conf"
+            say "  sudo sysctl --system"
+            say "  systemctl --user restart iconfetch-refresh.path"
+        else
+            say "The instant refresh couldn't start; see: systemctl --user status iconfetch-refresh.path"
+        fi
+    else
+        mkdir -p "$config/autostart"
+        printf '%s\n' "$autostart" >"$config/autostart/$APP_ID.Refresh.desktop"
+        watching="each time you sign in"
+    fi
+}
+
+# The watcher for this computer: only the app folders it has, since each one
+# costs an inotify instance and sessions can run short of those. A folder that
+# appears later is picked up the next time this runs (updates do).
+path_unit() {
+    while IFS= read -r line; do
+        case "$line" in
+            PathChanged=*)
+                dir=$(printf '%s' "${line#PathChanged=}" | sed "s|%h|${HOME:-}|")
+                [ -d "$dir" ] || [ "$dir" = /usr/share/applications ] || continue
+                ;;
+        esac
+        printf '%s\n' "$line"
+    done <"$src/data/iconfetch-refresh.path"
+}
+
+uninstall_refresh() {
+    [ "$watch" = 1 ] || return 0
+    if [ -f "$config/systemd/user/iconfetch-refresh.path" ] && user_systemd; then
+        systemctl --user disable --now iconfetch-refresh.path iconfetch-refresh.service >/dev/null 2>&1 || true
+    fi
+    rm -f "$config/systemd/user/iconfetch-refresh.service" "$config/systemd/user/iconfetch-refresh.path" \
+        "$config/autostart/$APP_ID.Refresh.desktop"
+    if user_systemd; then systemctl --user daemon-reload || true; fi
+}
+
 uninstall_files() {
+    # Stop the background refresh first, so it can't act while icons are being put back.
+    uninstall_refresh
     if [ -x "$bin/iconfetch" ]; then
         if "$bin/iconfetch" revert; then
             # Only now: the icons it applied live here until they're reverted.
@@ -269,12 +348,15 @@ fi
 [ "$deps" = 0 ] || [ -n "$D" ] || install_deps
 find_source
 install_files
+watching=""
+install_refresh
 
 if [ -n "$D" ]; then
     say "IconFetch $version staged in $D$prefix."
     exit 0
 fi
 say "IconFetch $version is installed. Open it from your apps, or run: iconfetch"
+[ -z "$watching" ] || say "It keeps its icons in step with your apps $watching."
 case ":${PATH:-}:" in
     *":$bin:"*) ;;
     *) say "($bin isn't on your PATH yet; sign out and back in, or run $bin/iconfetch)" ;;

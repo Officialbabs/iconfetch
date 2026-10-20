@@ -57,10 +57,15 @@ fi
 step "A real scan"
 iconfetch list
 
+step "Background refresh is set up (a sign-in entry: containers have no systemd user session)"
+test -f "$HOME/.config/autostart/io.iconfetch.IconFetch.Refresh.desktop"
+iconfetch refresh
+
 step "Uninstall leaves nothing behind"
 sh "$HOME/.local/lib/iconfetch/install.sh" --uninstall
 for path in "$HOME/.local/bin/iconfetch" "$HOME/.local/lib/iconfetch" \
-    "$HOME/.local/share/applications/io.iconfetch.IconFetch.desktop"; do
+    "$HOME/.local/share/applications/io.iconfetch.IconFetch.desktop" \
+    "$HOME/.config/autostart/io.iconfetch.IconFetch.Refresh.desktop"; do
     if [ -e "$path" ]; then
         echo "still there: $path"
         exit 1

@@ -15,7 +15,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from . import APP_ID
 from .apps import GENERIC, LOWRES, MISSING, App, installed_apps
-from .install import apply, revert, suggested
+from .install import REMOVED, RESTORED, UPDATED, apply, revert, suggested, sync
 from .sources import Candidate, Finder, to_png
 
 ICON = 40
@@ -192,6 +192,12 @@ class Window(Adw.ApplicationWindow):
         threading.Thread(target=self._fetch_all, daemon=True).start()
 
     def _fetch_all(self) -> None:
+        # First catch up with app updates and removals since IconFetch last looked.
+        try:
+            synced = sync()
+        except (OSError, GLib.Error) as error:
+            print(f"iconfetch: couldn't refresh its copies: {error}", file=sys.stderr)
+            synced = []
         apps = installed_apps()
         finder = Finder()
         found: dict[str, list[Candidate]] = {}
@@ -207,15 +213,17 @@ class Window(Adw.ApplicationWindow):
                 GLib.idle_add(self.progress.set_description, f"Checked {done} of {len(apps)} apps")
         # A source that failed for most apps is down or out of reach, not just missing one app.
         down = [source for source, count in failures.items() if count > len(apps) / 2]
-        GLib.idle_add(self._fetched, apps, found, down)
+        GLib.idle_add(self._fetched, apps, found, down, synced)
 
-    def _fetched(self, apps, found, down) -> bool:
+    def _fetched(self, apps, found, down, synced=()) -> bool:
         self.found = found
         self.busy = False
         self.refresh_button.set_sensitive(True)
         self.show_apps(apps)
         if down:
             self.toast(f"Couldn't reach {' or '.join(down)}. Showing what the other sources had.")
+        if synced:
+            self.toast(_synced_text(synced))
         return False
 
     # --- Showing -------------------------------------------------------------
@@ -331,6 +339,19 @@ class Window(Adw.ApplicationWindow):
             toast.set_action_name("win.undo")
             toast.set_action_target_value(GLib.Variant("as", undo))
         self.toasts.add_toast(toast)
+
+
+def _synced_text(synced) -> str:
+    """'Caught up with your apps: 1 updated, 2 uninstalled.'"""
+    count = {kind: sum(1 for _name, k in synced if k == kind) for kind in (UPDATED, REMOVED, RESTORED)}
+    parts = []
+    if count[UPDATED]:
+        parts.append(f"{count[UPDATED]} updated (icon kept)")
+    if count[REMOVED]:
+        parts.append(f"{count[REMOVED]} uninstalled (copy removed)")
+    if count[RESTORED]:
+        parts.append(f"{count[RESTORED]} back to the original icon (icon file missing)")
+    return "Caught up with your apps: " + ", ".join(parts)
 
 
 class Application(Adw.Application):

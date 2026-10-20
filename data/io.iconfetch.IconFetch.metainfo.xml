@@ -40,6 +40,11 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.2.0" date="2026-10-20">
+      <description>
+        <p>IconFetch's changes now follow your apps: when an app updates, its icon stays; when an app is uninstalled, its launcher goes with it instead of being left behind. This happens in the background within seconds of an install, update or removal.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-10-20">
       <description>
         <p>Installs on most Linux distributions with one command, and as .deb, .rpm and Arch packages. Runs on GTK 4.6 and libadwaita 1.1 and newer.</p>

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from iconfetch import apps as apps_mod
 from iconfetch.apps import GENERIC, LOWRES, MISSING, OWN, IconIndex, exec_program, installed_apps
-from iconfetch.install import apply, icons_dir, revert, suggested
+from iconfetch.install import REMOVED, RESTORED, UPDATED, apply, icons_dir, revert, suggested, sync
 from iconfetch.sources import BRANDS, FLATHUB, PAPIRUS, SNAP, Candidate, Finder, IconLinks, _icon_urls, folder_candidates, to_png
 
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#f60"/></svg>'
@@ -36,7 +36,7 @@ class Sandbox(unittest.TestCase):
             d.mkdir(parents=True)
         # GdkPixbuf's glycin loaders (SVG among them) and the MIME database they
         # sniff with are found through XDG_DATA_DIRS.
-        loaders = root / "loaders"
+        loaders = self.loaders = root / "loaders"
         loaders.mkdir()
         for name in ("glycin-loaders", "mime"):
             if Path("/usr/share", name).is_dir():
@@ -181,6 +181,108 @@ class ApplyRevert(Sandbox):
         apply(self.app("bare.desktop"), self.cand())
         revert(self.app("bare.desktop"))
         self.assertNotIn("Icon=", (self.home / "applications/bare.desktop").read_text())
+
+
+class Sync(Sandbox):
+    """IconFetch's copies follow the apps they stand in for."""
+
+    ID = "org.example.App.desktop"
+
+    def setUp(self):
+        super().setUp()
+        # Only the sandbox's app folders, never the real /usr/share.
+        self.known = apps_mod.KNOWN_APP_DIRS
+        apps_mod.KNOWN_APP_DIRS = []
+
+    def tearDown(self):
+        apps_mod.KNOWN_APP_DIRS = self.known
+        super().tearDown()
+
+    def applied_copy(self, exec_line="/nonexistent/example %u"):
+        self.system_entry(self.ID, entry("Example", icon="missing-icon", exec_line=exec_line))
+        apply(self.app(self.ID), self.cand())
+        return self.home / "applications" / self.ID
+
+    def test_a_copy_follows_the_apps_update_and_keeps_its_icon(self):
+        copy = self.applied_copy()
+        icon = self.app(self.ID).icon
+        action = "Actions=new;\n\n[Desktop Action new]\nName=New window\nExec=/nonexistent/example --window\n"
+        self.system_entry(self.ID, entry("Example 2", icon="new-icon", exec_line="/nonexistent/example --new %u", extra=action))
+        self.assertEqual(sync(), [("Example 2", UPDATED)])
+        now = self.app(self.ID)
+        self.assertEqual(now.icon, icon)
+        self.assertTrue(now.ours)
+        self.assertEqual(now.original_icon, "new-icon")
+        self.assertIn("--new", now.exec)
+        self.assertIn("[Desktop Action new]", copy.read_text())
+        self.assertEqual(sync(), [])
+
+    def test_an_unchanged_copy_is_left_alone(self):
+        copy = self.applied_copy()
+        before = copy.stat().st_mtime_ns
+        self.assertEqual(sync(), [])
+        self.assertEqual(copy.stat().st_mtime_ns, before)
+
+    def test_an_uninstalled_apps_copy_goes_with_its_icon(self):
+        copy = self.applied_copy()
+        icon = self.app(self.ID).icon
+        (self.system / "applications" / self.ID).unlink()
+        self.assertEqual(sync(), [("Example", REMOVED)])
+        self.assertFalse(copy.exists())
+        self.assertFalse(os.path.exists(icon))
+        self.assertEqual(installed_apps(), [])
+
+    def test_kept_while_the_program_is_still_installed(self):
+        program = Path(self.tmp.name) / "bin" / "example"
+        program.parent.mkdir()
+        program.write_text("#!/bin/sh\n")
+        copy = self.applied_copy(exec_line=f"{program} %u")
+        (self.system / "applications" / self.ID).unlink()
+        self.assertEqual(sync(), [])
+        self.assertTrue(copy.exists())
+
+    def test_an_app_folder_missing_from_the_environment_still_counts(self):
+        copy = self.applied_copy()
+        # As in a bare background service: the app's folder isn't in XDG_DATA_DIRS,
+        # but it is one of the standard app folders.
+        os.environ["XDG_DATA_DIRS"] = str(self.loaders)
+        apps_mod.KNOWN_APP_DIRS = [str(self.system)]
+        self.assertEqual(sync(), [])
+        self.assertTrue(copy.exists())
+
+    def test_a_missing_icon_file_undoes_the_change(self):
+        copy = self.applied_copy()
+        os.unlink(self.app(self.ID).icon)
+        self.assertEqual(sync(), [("Example", RESTORED)])
+        self.assertFalse(copy.exists())
+        self.assertEqual(self.app(self.ID).icon, "missing-icon")
+
+        self.user_entry("mine.desktop", entry("Mine", icon="preferences-color"))
+        apply(self.app("mine.desktop"), self.cand())
+        os.unlink(self.app("mine.desktop").icon)
+        self.assertEqual(sync(), [("Mine", RESTORED)])
+        mine = self.app("mine.desktop")
+        self.assertEqual(mine.icon, "preferences-color")
+        self.assertFalse(mine.applied)
+
+    def test_unused_icons_are_deleted_and_used_ones_kept(self):
+        self.applied_copy()
+        stray = icons_dir() / "uninstalled-app-0123456789ab.png"
+        stray.write_bytes(self.cand().png)
+        self.assertEqual(sync(), [])
+        self.assertFalse(stray.exists())
+        self.assertTrue(os.path.exists(self.app(self.ID).icon))
+
+    def test_reapplying_builds_on_the_updated_entry(self):
+        self.applied_copy()
+        old_icon = self.app(self.ID).icon
+        self.system_entry(self.ID, entry("Example", icon="missing-icon", exec_line="/nonexistent/example --v2 %u"))
+        apply(self.app(self.ID), self.cand(WIDE_SVG))
+        now = self.app(self.ID)
+        self.assertIn("--v2", now.exec)
+        self.assertNotEqual(now.icon, old_icon)
+        self.assertFalse(os.path.exists(old_icon))
+        self.assertEqual(now.original_icon, "missing-icon")
 
 
 class FakeWeb:

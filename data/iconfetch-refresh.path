@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch the app folders for IconFetch
+Documentation=https://github.com/Officialbabs/iconfetch
+
+[Path]
+PathChanged=/usr/share/applications
+PathChanged=/usr/local/share/applications
+PathChanged=/var/lib/snapd/desktop/applications
+PathChanged=/var/lib/flatpak/exports/share/applications
+PathChanged=%h/.local/share/flatpak/exports/share/applications
+Unit=iconfetch-refresh.service
+
+[Install]
+WantedBy=default.target

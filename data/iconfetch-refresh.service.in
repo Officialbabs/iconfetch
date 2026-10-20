@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep IconFetch's icons in step with app installs, updates and removals
+Documentation=https://github.com/Officialbabs/iconfetch
+
+[Service]
+Type=oneshot
+# Let a package manager finish writing; changes in the meantime fold into this run.
+ExecStartPre=sleep 3
+ExecStart=@EXEC@ refresh
+
+[Install]
+WantedBy=default.target

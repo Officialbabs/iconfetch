@@ -198,7 +198,7 @@ def has_key(kf: GLib.KeyFile, key: str) -> bool:
         return False
 
 
-def _get(kf: GLib.KeyFile, key: str, localized: bool = False) -> str:
+def entry_value(kf: GLib.KeyFile, key: str, localized: bool = False) -> str:
     try:
         return kf.get_locale_string(GROUP, key, None) if localized else kf.get_string(GROUP, key)
     except GLib.Error:
@@ -216,13 +216,13 @@ def load_entry(desktop_id: str, path: Path) -> Optional[App]:
     app = App(
         id=desktop_id,
         path=path,
-        name=_get(kf, "Name", localized=True) or desktop_id,
-        icon=_get(kf, "Icon"),
-        exec=_get(kf, "Exec"),
-        wmclass=_get(kf, "StartupWMClass"),
+        name=entry_value(kf, "Name", localized=True) or desktop_id,
+        icon=entry_value(kf, "Icon"),
+        exec=entry_value(kf, "Exec"),
+        wmclass=entry_value(kf, "StartupWMClass"),
     )
     if has_key(kf, MARK_ORIGINAL):
-        app.original_icon = _get(kf, MARK_ORIGINAL)
+        app.original_icon = entry_value(kf, MARK_ORIGINAL)
         try:
             app.ours = kf.get_boolean(GROUP, MARK_OVERRIDE)
         except GLib.Error:
@@ -230,10 +230,10 @@ def load_entry(desktop_id: str, path: Path) -> Optional[App]:
     return app
 
 
-def find_entries() -> dict[str, Path]:
+def find_entries(dirs: Optional[list[Path]] = None) -> dict[str, Path]:
     """Every desktop ID and the file that wins for it (the first data dir has priority)."""
     found: dict[str, Path] = {}
-    for base in data_dirs():
+    for base in data_dirs() if dirs is None else dirs:
         root = base / "applications"
         if not root.is_dir():
             continue
@@ -245,6 +245,33 @@ def find_entries() -> dict[str, Path]:
                 desktop_id = str(path.relative_to(root)).replace(os.sep, "-")
                 found.setdefault(desktop_id, path)
     return found
+
+
+# Where installed apps' entries live on most systems. A background service may
+# run with a shorter XDG_DATA_DIRS, and an app must never look uninstalled
+# just because its folder wasn't listed.
+KNOWN_APP_DIRS = ["/usr/local/share", "/usr/share", "/var/lib/snapd/desktop", "/var/lib/flatpak/exports/share"]
+
+
+def system_entries() -> dict[str, Path]:
+    """Each desktop ID's entry outside the person's own folder: what an IconFetch copy stands in for."""
+    dirs = data_dirs()[1:]
+    for extra in [Path(d) for d in KNOWN_APP_DIRS] + [data_home() / "flatpak/exports/share"]:
+        if extra not in dirs:
+            dirs.append(extra)
+    return find_entries(dirs)
+
+
+def program_present(exec_line: str, try_exec: str = "") -> Optional[bool]:
+    """Whether an entry's program is still installed; None when the Exec line can't tell (flatpak run …)."""
+    program = try_exec or exec_program(exec_line)
+    if not program or Path(program).name in LAUNCHERS:
+        return None
+    if "/" in program:
+        return os.path.exists(program)
+    path = os.environ.get("PATH", "").split(":")
+    path += ["/usr/local/bin", "/usr/bin", "/bin", "/usr/games", "/snap/bin", str(Path.home() / ".local/bin")]
+    return any(os.path.exists(os.path.join(folder, program)) for folder in path if folder)
 
 
 def installed_apps(include_ada: bool = False) -> list[App]:

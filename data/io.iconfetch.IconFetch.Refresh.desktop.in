@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=IconFetch refresh
+Comment=Keep IconFetch's icons in step with app updates and removals
+Exec=@EXEC@ refresh
+Icon=@ICON@
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

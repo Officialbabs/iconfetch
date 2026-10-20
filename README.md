@@ -36,9 +36,21 @@ nothing serves a cached copy, and GIO's app monitor tells the shell at once.
 
 Undo removes IconFetch's copy, or restores the original `Icon=` line.
 
-One thing to know: while IconFetch's copy of a system entry is in place, it
-also hides later changes to that entry (a renamed action after an update, say).
-Undo and apply again to pick them up.
+### Keeping up with your apps
+
+A copy stands in for the app's own entry, so IconFetch keeps it in step:
+
+- **The app updates its entry** (a new action, a changed command): the copy is
+  rebuilt from the new entry, with the icon you chose.
+- **The app is uninstalled**: the copy and its icon are removed, so no broken
+  launcher stays behind. An app only counts as uninstalled when its entry is
+  gone from every standard app folder *and* its program is gone too.
+- **IconFetch's icon file was deleted**: the app gets its own icon back.
+
+This runs by itself. With systemd (most distributions), a user service starts
+within seconds of an app folder changing, and once at sign-in. Elsewhere, a
+sign-in entry runs it. It also runs whenever you open IconFetch, and as
+`iconfetch refresh`.
 
 ## Install
 
@@ -51,7 +63,8 @@ curl -fsSL https://raw.githubusercontent.com/Officialbabs/iconfetch/main/install
 It checks for Python 3.9+, PyGObject, GTK 4.6+ and libadwaita 1.1+, and asks
 before installing whatever is missing with your package manager (apt, dnf,
 zypper, pacman, apk, xbps or emerge). Then it installs IconFetch for you alone,
-in `~/.local`, with an entry in your app menu. Run it again to update.
+in `~/.local`, with an entry in your app menu, and sets up the background
+refresh (`--no-watch` skips that). Run it again to update.
 
 Every change is tested on Ubuntu 22.04 and 24.04, Debian 12 and 13, Fedora,
 Arch Linux, openSUSE Tumbleweed, Alpine and Void Linux.
@@ -70,7 +83,12 @@ To remove a one-line install (it puts every original icon back first):
 sh ~/.local/lib/iconfetch/install.sh --uninstall
 ```
 
-Before removing a package, run `iconfetch revert`.
+Before removing a package, run `iconfetch revert`. Packages refresh at sign-in;
+for the instant refresh after installs and updates, turn on the watcher once:
+
+```sh
+systemctl --user enable --now iconfetch-refresh.path
+```
 
 ## Use
 
@@ -80,6 +98,7 @@ iconfetch list          # what each app shows now and what was found (* = would 
 iconfetch apply         # apply the ticked-by-default ones without the window
 iconfetch apply vlc     # apply the best find for specific apps (desktop IDs)
 iconfetch revert        # put every original icon back (or: iconfetch revert vlc)
+iconfetch refresh       # catch up with app updates and removals (runs by itself)
 ```
 
 ## Packaging
@@ -90,8 +109,9 @@ iconfetch revert        # put every original icon back (or: iconfetch revert vlc
 sh install.sh --prefix=/usr --destdir="$pkgdir" --no-deps
 ```
 
-That gives `/usr/bin/iconfetch`, the code in `/usr/lib/iconfetch`, and the
-desktop entry, icon and AppStream metadata under `/usr/share`.
+That gives `/usr/bin/iconfetch`, the code in `/usr/lib/iconfetch`, the desktop
+entry, icon and AppStream metadata under `/usr/share`, the refresh service and
+watcher in `/usr/lib/systemd/user`, and a sign-in entry in `/etc/xdg/autostart`.
 `packaging/` has the `.deb` builder, the RPM spec and the PKGBUILD that the
 release workflow uses. Pushing a `v*` tag that matches `__version__` builds
 all three, installs each on its distribution, and publishes the release.
