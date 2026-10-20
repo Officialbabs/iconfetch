@@ -1,0 +1,19 @@
+# Maintainer: Oluwasegun Babalola <133790822+Officialbabs@users.noreply.github.com>
+pkgname=iconfetch
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="Give installed apps their real icons, applied right away"
+arch=('any')
+url="https://github.com/Officialbabs/iconfetch"
+license=('GPL-3.0-or-later')
+depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'gdk-pixbuf2' 'librsvg' 'shared-mime-info')
+options=('!strip' '!debug')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# Each release's PKGBUILD (attached to the GitHub release) carries the real checksum.
+sha256sums=('SKIP')
+
+package() {
+    cd "$pkgname-$pkgver"
+    sh install.sh --prefix=/usr --destdir="$pkgdir" --no-deps
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

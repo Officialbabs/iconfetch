@@ -1,0 +1,37 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  distro:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Ubuntu 22.04", image: "ubuntu:22.04", ui: 1 }
+          - { name: "Ubuntu 24.04", image: "ubuntu:24.04", ui: 1 }
+          - { name: "Debian 12", image: "debian:12", ui: 1 }
+          - { name: "Debian 13", image: "debian:13", ui: 0 }
+          - { name: "Fedora", image: "fedora:latest", ui: 1 }
+          - { name: "Arch Linux", image: "archlinux:latest", ui: 1 }
+          - { name: "openSUSE Tumbleweed", image: "opensuse/tumbleweed:latest", ui: 0 }
+          - { name: "Alpine", image: "alpine:latest", ui: 0 }
+          - { name: "Void Linux", image: "ghcr.io/void-linux/void-glibc-full:latest", ui: 0 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with the one-line installer and test
+        env:
+          REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >
+          docker run --rm -e REF -e UI=${{ matrix.ui }}
+          -v "$PWD:/src:ro" "${{ matrix.image }}" sh /src/.github/ci/distro-test.sh

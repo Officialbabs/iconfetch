@@ -1,7 +1,7 @@
 # IconFetch
 
-Gives your installed apps their real icons, and applies them right away. The
-dock, search and switcher redraw within a second, with no sign-out needed.
+Gives your installed apps on Linux their real icons, and applies them right away.
+The dock and app menu update within a second, with no sign-out needed.
 
 IconFetch lists every app with the icon it shows now and the icons it found
 online. Apps that show a stand-in, nothing at all, or a blurry icon are ticked
@@ -23,7 +23,7 @@ Checked in this order, most official first:
 
 An app is matched by its ID, program, window class or icon name, and by its
 name only when the name isn't an ordinary word. That way "Files" never picks up
-an unrelated app called Files. Ada's own apps are left alone.
+an unrelated app called Files. On the Ada desktop, Ada's own apps are left alone.
 
 ## How applying works
 
@@ -40,24 +40,68 @@ One thing to know: while IconFetch's copy of a system entry is in place, it
 also hides later changes to that entry (a renamed action after an update, say).
 Undo and apply again to pick them up.
 
+## Install
+
+On any distribution:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Officialbabs/iconfetch/main/install.sh | sh
+```
+
+It checks for Python 3.9+, PyGObject, GTK 4.6+ and libadwaita 1.1+, and asks
+before installing whatever is missing with your package manager (apt, dnf,
+zypper, pacman, apk, xbps or emerge). Then it installs IconFetch for you alone,
+in `~/.local`, with an entry in your app menu. Run it again to update.
+
+Every change is tested on Ubuntu 22.04 and 24.04, Debian 12 and 13, Fedora,
+Arch Linux, openSUSE Tumbleweed, Alpine and Void Linux.
+
+Or as a package, from the [latest release](https://github.com/Officialbabs/iconfetch/releases/latest):
+
+| Distribution | Install |
+|---|---|
+| Debian, Ubuntu, Mint, Pop!_OS | download `iconfetch.deb`, then `sudo apt install ./iconfetch.deb` |
+| Fedora | `sudo dnf install https://github.com/Officialbabs/iconfetch/releases/latest/download/iconfetch.rpm` |
+| Arch, Manjaro, EndeavourOS | download `PKGBUILD` into an empty folder, then `makepkg -si` |
+
+To remove a one-line install (it puts every original icon back first):
+
+```sh
+sh ~/.local/lib/iconfetch/install.sh --uninstall
+```
+
+Before removing a package, run `iconfetch revert`.
+
 ## Use
 
 ```sh
-./install.sh            # adds IconFetch to your apps and `iconfetch` to ~/.local/bin
 iconfetch               # the window
 iconfetch list          # what each app shows now and what was found (* = would apply)
 iconfetch apply         # apply the ticked-by-default ones without the window
 iconfetch apply vlc     # apply the best find for specific apps (desktop IDs)
 iconfetch revert        # put every original icon back (or: iconfetch revert vlc)
-./install.sh --uninstall  # reverts everything, then removes IconFetch
 ```
 
-Needs Python 3 with PyGObject, GTK 4 and libadwaita.
+## Packaging
+
+`install.sh` also stages a system-wide install for packagers:
+
+```sh
+sh install.sh --prefix=/usr --destdir="$pkgdir" --no-deps
+```
+
+That gives `/usr/bin/iconfetch`, the code in `/usr/lib/iconfetch`, and the
+desktop entry, icon and AppStream metadata under `/usr/share`.
+`packaging/` has the `.deb` builder, the RPM spec and the PKGBUILD that the
+release workflow uses. Pushing a `v*` tag that matches `__version__` builds
+all three, installs each on its distribution, and publishes the release.
 
 ## Tests
 
 ```sh
 python3 -m unittest discover -s tests
+python3 tests/smoke_ui.py              # opens the window and clicks through it
+python3 tests/smoke_ui.py --old-adw    # the same, as on libadwaita 1.1
 ```
 
 The tests run in throwaway data folders with a fake network, so they never

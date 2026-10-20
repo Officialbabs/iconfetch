@@ -1,0 +1,100 @@
+name: Packages
+
+# On a version tag (v1.2.3): build the source tarball, .deb, .rpm and Arch
+# package, install each on its distribution, and publish them as a release.
+# On a pull request that touches packaging: the same, without publishing.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "install.sh"
+      - "data/**"
+      - "packaging/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' iconfetch/__init__.py)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match __version__ $version"; exit 1
+          fi
+          grep -q "<release version=\"$version\"" data/io.iconfetch.IconFetch.metainfo.xml \
+            || { echo "::error::metainfo has no <release> for $version"; exit 1; }
+          echo "VERSION=$version" >>"$GITHUB_ENV"
+
+      - name: Source tarball
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="iconfetch-$VERSION/" -o "dist/iconfetch-$VERSION.tar.gz" HEAD
+
+      - name: Debian and Ubuntu package
+        run: sh packaging/deb/build.sh
+
+      - name: Fedora package
+        run: docker run --rm -v "$PWD:/src" -w /src fedora:latest sh packaging/rpm/build.sh
+
+      - name: Arch package
+        run: |
+          # A release's PKGBUILD points at GitHub's archive of the tag, with its checksum.
+          url=""
+          [ "$GITHUB_REF_TYPE" != tag ] || url="https://github.com/$GITHUB_REPOSITORY/archive/v$VERSION.tar.gz"
+          docker run --rm -e SOURCE_URL="$url" -v "$PWD:/src" -w /src archlinux:latest sh packaging/arch/build.sh
+
+      - name: Install each package on its distribution
+        run: |
+          # The package's dependencies must be enough for the window and the icon decoding to load.
+          check='iconfetch --version && test -f /usr/share/applications/io.iconfetch.IconFetch.desktop && PYTHONPATH=/usr/lib/iconfetch python3 -c "import iconfetch.ui, iconfetch.sources"'
+          docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:22.04 sh -c \
+            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /dist/iconfetch_${VERSION}_all.deb >/dev/null && $check"
+          docker run --rm -v "$PWD/dist:/dist:ro" debian:12 sh -c \
+            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /dist/iconfetch_${VERSION}_all.deb >/dev/null && $check"
+          docker run --rm -v "$PWD/dist:/dist:ro" fedora:latest sh -c \
+            "dnf install -y -q /dist/iconfetch-${VERSION}-1.noarch.rpm >/dev/null && $check"
+          docker run --rm -v "$PWD/dist:/dist:ro" archlinux:latest sh -c \
+            "pacman -Syu --noconfirm -q >/dev/null && pacman -U --noconfirm /dist/iconfetch-${VERSION}-1-any.pkg.tar.zst >/dev/null && $check"
+
+      - name: Fixed names for "latest" download links
+        run: |
+          cp "dist/iconfetch-$VERSION.tar.gz" dist/iconfetch.tar.gz
+          cp "dist/iconfetch_${VERSION}_all.deb" dist/iconfetch.deb
+          cp "dist/iconfetch-${VERSION}-1.noarch.rpm" dist/iconfetch.rpm
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iconfetch-${{ env.VERSION }}-packages
+          path: dist/
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat >notes.md <<EOF
+          ## Install
+
+          Any distribution:
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh
+          \`\`\`
+
+          Debian, Ubuntu, Mint, Pop!_OS: download \`iconfetch.deb\`, then \`sudo apt install ./iconfetch.deb\`
+
+          Fedora: \`sudo dnf install https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/iconfetch-$VERSION-1.noarch.rpm\`
+
+          Arch: download \`PKGBUILD\` into an empty folder, then \`makepkg -si\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* --title "IconFetch $VERSION" --notes-file notes.md --generate-notes

@@ -20,6 +20,29 @@ from .sources import Candidate, Finder, to_png
 
 ICON = 40
 WORKERS = 8
+# Oldest supported: GTK 4.6 and libadwaita 1.1 (Ubuntu 22.04, Debian 12).
+MIN_GTK = (4, 6)
+MIN_ADW = (1, 1)
+
+
+def _spinner() -> Gtk.Widget:
+    if hasattr(Adw, "Spinner"):  # libadwaita 1.6
+        return Adw.Spinner(width_request=32, height_request=32)
+    return Gtk.Spinner(spinning=True, width_request=32, height_request=32, halign=Gtk.Align.CENTER)
+
+
+def _frame(header: Gtk.Widget, content: Gtk.Widget) -> Gtk.Widget:
+    """A header bar over the content."""
+    if hasattr(Adw, "ToolbarView"):  # libadwaita 1.4
+        view = Adw.ToolbarView()
+        view.add_top_bar(header)
+        view.set_content(content)
+        return view
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    content.set_vexpand(True)
+    box.append(header)
+    box.append(content)
+    return box
 
 
 def _texture(png: bytes) -> Gdk.Texture:
@@ -140,20 +163,20 @@ class Window(Adw.ApplicationWindow):
         self.apply_button.connect("clicked", lambda *_: self.apply_selected())
         header.pack_end(self.apply_button)
 
-        self.progress = Adw.StatusPage(title="Looking for icons", child=Adw.Spinner(width_request=32, height_request=32))
+        self.progress = Adw.StatusPage(title="Looking for icons", child=_spinner())
         self.toasts = Adw.ToastOverlay()
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
         self.stack.add_named(self.progress, "loading")
         self.toasts.set_child(self.stack)
 
-        view = Adw.ToolbarView()
-        view.add_top_bar(header)
-        view.set_content(self.toasts)
-        self.set_content(view)
+        self.set_content(_frame(header, self.toasts))
 
         refresh = Gio.SimpleAction.new("refresh", None)
         refresh.connect("activate", lambda *_: self.fetch())
         self.add_action(refresh)
+        undo = Gio.SimpleAction.new("undo", GLib.VariantType.new("as"))
+        undo.connect("activate", lambda _action, ids: self.undo(ids.unpack()))
+        self.add_action(undo)
         application.set_accels_for_action("win.refresh", ["<Control>r", "F5"])
 
     # --- Looking -------------------------------------------------------------
@@ -303,14 +326,17 @@ class Window(Adw.ApplicationWindow):
     def toast(self, text: str, undo: Optional[list[str]] = None) -> None:
         toast = Adw.Toast(title=GLib.markup_escape_text(text), timeout=6)
         if undo:
+            # An action rather than the button-clicked signal, which libadwaita 1.1 lacks.
             toast.set_button_label("Undo")
-            toast.connect("button-clicked", lambda *_: self.undo(undo))
+            toast.set_action_name("win.undo")
+            toast.set_action_target_value(GLib.Variant("as", undo))
         self.toasts.add_toast(toast)
 
 
 class Application(Adw.Application):
     def __init__(self) -> None:
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        flags = getattr(Gio.ApplicationFlags, "DEFAULT_FLAGS", Gio.ApplicationFlags.FLAGS_NONE)  # GLib < 2.74
+        super().__init__(application_id=APP_ID, flags=flags)
         GLib.set_application_name("IconFetch")
         quit_action = Gio.SimpleAction.new("quit", None)
         quit_action.connect("activate", lambda *_: self.quit())
@@ -325,5 +351,14 @@ class Application(Adw.Application):
         window.present()
 
 
+def versions() -> tuple[tuple[int, int], tuple[int, int]]:
+    return (Gtk.get_major_version(), Gtk.get_minor_version()), (Adw.get_major_version(), Adw.get_minor_version())
+
+
 def run() -> int:
+    gtk, adw = versions()
+    if gtk < MIN_GTK or adw < MIN_ADW:
+        print(f"IconFetch needs GTK {'.'.join(map(str, MIN_GTK))}+ and libadwaita {'.'.join(map(str, MIN_ADW))}+; "
+              f"this system has GTK {'.'.join(map(str, gtk))} and libadwaita {'.'.join(map(str, adw))}.", file=sys.stderr)
+        return 1
     return Application().run([sys.argv[0]])

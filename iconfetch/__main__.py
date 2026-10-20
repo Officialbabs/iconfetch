@@ -82,7 +82,10 @@ def cmd_revert(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import __version__
+
     parser = argparse.ArgumentParser(prog="iconfetch", description="Give installed apps their real icons.")
+    parser.add_argument("--version", action="version", version=f"IconFetch {__version__}")
     commands = parser.add_subparsers(dest="command")
     for name, handler, text in (
         ("list", cmd_list, "show apps and the icons found for them"),

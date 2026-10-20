@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.iconfetch.IconFetch</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>IconFetch</name>
+  <summary>Give installed apps their real icons</summary>
+  <description>
+    <p>
+      IconFetch lists your installed apps with the icon each one shows now, and
+      finds its real icon online: on Flathub, the Snap Store, the app's own
+      folder or website, a collection of brand icons, or the Papirus theme.
+    </p>
+    <p>
+      Apps showing a stand-in, nothing at all, or a blurry icon are ticked for
+      you. Apply, and the dock and app menu update right away, with no sign-out.
+      Every change can be undone.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.iconfetch.IconFetch.desktop</launchable>
+  <url type="homepage">https://github.com/Officialbabs/iconfetch</url>
+  <url type="bugtracker">https://github.com/Officialbabs/iconfetch/issues</url>
+  <developer id="io.github.officialbabs">
+    <name>Oluwasegun Babalola</name>
+  </developer>
+  <categories>
+    <category>Settings</category>
+    <category>DesktopSettings</category>
+  </categories>
+  <keywords>
+    <keyword>icon</keyword>
+    <keyword>dock</keyword>
+    <keyword>launcher</keyword>
+  </keywords>
+  <provides>
+    <binary>iconfetch</binary>
+  </provides>
+  <requires>
+    <internet>always</internet>
+  </requires>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.1.0" date="2026-10-20">
+      <description>
+        <p>Installs on most Linux distributions with one command, and as .deb, .rpm and Arch packages. Runs on GTK 4.6 and libadwaita 1.1 and newer.</p>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-10-17"/>
+  </releases>
+</component>
