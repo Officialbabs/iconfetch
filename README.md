@@ -3,6 +3,8 @@
 Gives your installed apps on Linux their real icons, and applies them right away.
 The dock and app menu update within a second, with no sign-out needed.
 
+![IconFetch listing seven apps with blank stand-in icons, each next to the real icon it found on Flathub or Papirus](docs/screenshot.png)
+
 IconFetch lists every app with the icon it shows now, then fills in the icons
 it finds online as they arrive. Apps that show a stand-in, nothing at all, or a
 blurry icon are ticked for you. Tick any others you'd like to swap, choose among the options by
