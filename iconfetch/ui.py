@@ -64,7 +64,8 @@ def _current_image(app: App) -> Gtk.Image:
 class AppRow(Adw.ActionRow):
     """One app: its icon now, and the icons found for it (a spinner while still looking)."""
 
-    def __init__(self, app: App, found: Optional[list[Candidate]], on_toggle) -> None:
+    def __init__(self, app: App, found: Optional[list[Candidate]], on_toggle,
+                 slots: Optional[Gtk.SizeGroup] = None) -> None:
         super().__init__(title=GLib.markup_escape_text(app.name))
         self.app = app
         self.found: list[Candidate] = []
@@ -83,11 +84,19 @@ class AppRow(Adw.ActionRow):
         self.arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")
         self.arrow.add_css_class("dim-label")
         self.add_suffix(self.arrow)
-        self.end = Gtk.Box(valign=Gtk.Align.CENTER)
+        # One width for every row's slot (`slots`), so the arrows line up whether
+        # the find sits in a picker button or stands alone.
+        # Homogeneous: the one child gets the slot's whole width and centres itself in
+        # it, without asking the row for more room (hexpand would).
+        self.end = Gtk.Box(valign=Gtk.Align.CENTER, homogeneous=True, hexpand=False)
+        if slots is not None:
+            slots.add_widget(self.end)
         self.add_suffix(self.end)
         self.picture = Gtk.Image(pixel_size=ICON)
         if found is None:
-            self.end.append(_spinner(24))
+            spinner = _spinner(24)
+            spinner.set_halign(Gtk.Align.CENTER)
+            self.end.append(spinner)
             self.set_subtitle(GLib.markup_escape_text(f"{app.state.text}  ·  looking…"))
         else:
             self.set_found(found)
@@ -117,10 +126,12 @@ class AppRow(Adw.ActionRow):
             return
         if len(found) > 1:
             # Every find, to pick from: Flathub's, the website's, a theme's…
-            self.chooser = Gtk.MenuButton(child=self.picture, valign=Gtk.Align.CENTER, popover=self._options())
+            self.chooser = Gtk.MenuButton(child=self.picture, valign=Gtk.Align.CENTER, popover=self._options(),
+                                          halign=Gtk.Align.CENTER)
             self.chooser.add_css_class("flat")
             self.end.append(self.chooser)
         else:
+            self.picture.set_halign(Gtk.Align.CENTER)
             self.end.append(self.picture)
         self.check.set_sensitive(True)
         self.arrow.set_visible(True)
@@ -312,6 +323,7 @@ class Window(Adw.ApplicationWindow):
         kept = {row.app.id: (row.touched, row.check.get_active(), row.choice) for row in self.rows}
         self.rows, self.row_by_id = [], {}
         page = Adw.PreferencesPage()
+        self.slots = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
 
         applied = [a for a in apps if a.applied]
         needs = [a for a in apps if not a.applied and a.state.status in (MISSING, GENERIC, LOWRES)]
@@ -345,7 +357,7 @@ class Window(Adw.ApplicationWindow):
         group = Adw.PreferencesGroup(title=title, description=description)
         rows = []
         for app in apps:
-            row = AppRow(app, self.found.get(app.id), self._update_apply)
+            row = AppRow(app, self.found.get(app.id), self._update_apply, self.slots)
             if app.id in kept:
                 row.touched, active, choice = kept[app.id]
                 if row.found and choice < len(row.found):
