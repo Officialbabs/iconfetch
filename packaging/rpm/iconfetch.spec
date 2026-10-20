@@ -1,5 +1,5 @@
 Name:           iconfetch
-Version:        1.3.0
+Version:        1.3.1
 Release:        1
 Summary:        Give installed apps their real icons
 License:        GPL-3.0-or-later
@@ -43,6 +43,8 @@ sh install.sh --prefix=%{_prefix} --destdir=%{buildroot} --no-deps
 %config(noreplace) %{_sysconfdir}/xdg/autostart/io.iconfetch.IconFetch.Refresh.desktop
 
 %changelog
+* Tue Oct 20 2026 Oluwasegun Babalola <133790822+Officialbabs@users.noreply.github.com> - 1.3.1-1
+- Arrows and found icons line up on every row
 * Tue Oct 20 2026 Oluwasegun Babalola <133790822+Officialbabs@users.noreply.github.com> - 1.3.0-1
 - Faster: shows apps at once, remembers finds for a week, quicker first search
 * Tue Oct 20 2026 Oluwasegun Babalola <133790822+Officialbabs@users.noreply.github.com> - 1.2.0-1
