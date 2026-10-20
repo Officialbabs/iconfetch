@@ -3,9 +3,9 @@
 Gives your installed apps on Linux their real icons, and applies them right away.
 The dock and app menu update within a second, with no sign-out needed.
 
-IconFetch lists every app with the icon it shows now and the icons it found
-online. Apps that show a stand-in, nothing at all, or a blurry icon are ticked
-for you. Tick any others you'd like to swap, choose among the options by
+IconFetch lists every app with the icon it shows now, then fills in the icons
+it finds online as they arrive. Apps that show a stand-in, nothing at all, or a
+blurry icon are ticked for you. Tick any others you'd like to swap, choose among the options by
 clicking the icon on the right, and press **Apply**. Every change can be undone.
 
 ## Where icons come from
@@ -20,6 +20,11 @@ Checked in this order, most official first:
 | Website | The app's homepage: its manifest icons, touch icon or a large favicon |
 | Brand icons | [dashboard-icons](https://github.com/homarr-labs/dashboard-icons), brand icons by app name |
 | Papirus theme | Full-colour theme icons, for system tools whose generic icon names (e.g. `preferences-system-network`) Adwaita no longer ships |
+
+Each app's sources are searched side by side; the app's website is only
+asked when no app store has its icon. Finds are kept for a week in
+`~/.cache/iconfetch`, so IconFetch opens in seconds; **Look again** (Ctrl+R)
+or `--fresh` asks every source anew.
 
 An app is matched by its ID, program, window class or icon name, and by its
 name only when the name isn't an ordinary word. That way "Files" never picks up
@@ -94,7 +99,7 @@ systemctl --user enable --now iconfetch-refresh.path
 
 ```sh
 iconfetch               # the window
-iconfetch list          # what each app shows now and what was found (* = would apply)
+iconfetch list          # what each app shows now and what was found (* = would apply; --fresh to look again)
 iconfetch apply         # apply the ticked-by-default ones without the window
 iconfetch apply vlc     # apply the best find for specific apps (desktop IDs)
 iconfetch revert        # put every original icon back (or: iconfetch revert vlc)

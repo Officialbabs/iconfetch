@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import gi
@@ -19,16 +20,16 @@ from .install import REMOVED, RESTORED, UPDATED, apply, revert, suggested, sync
 from .sources import Candidate, Finder, to_png
 
 ICON = 40
-WORKERS = 8
+WORKERS = 16  # apps looked up at once
 # Oldest supported: GTK 4.6 and libadwaita 1.1 (Ubuntu 22.04, Debian 12).
 MIN_GTK = (4, 6)
 MIN_ADW = (1, 1)
 
 
-def _spinner() -> Gtk.Widget:
+def _spinner(size: int = 32) -> Gtk.Widget:
     if hasattr(Adw, "Spinner"):  # libadwaita 1.6
-        return Adw.Spinner(width_request=32, height_request=32)
-    return Gtk.Spinner(spinning=True, width_request=32, height_request=32, halign=Gtk.Align.CENTER)
+        return Adw.Spinner(width_request=size, height_request=size)
+    return Gtk.Spinner(spinning=True, width_request=size, height_request=size, halign=Gtk.Align.CENTER)
 
 
 def _frame(header: Gtk.Widget, content: Gtk.Widget) -> Gtk.Widget:
@@ -61,31 +62,70 @@ def _current_image(app: App) -> Gtk.Image:
 
 
 class AppRow(Adw.ActionRow):
-    """One app: its icon now, and the icon found for it."""
+    """One app: its icon now, and the icons found for it (a spinner while still looking)."""
 
-    def __init__(self, app: App, found: list[Candidate], on_toggle) -> None:
+    def __init__(self, app: App, found: Optional[list[Candidate]], on_toggle) -> None:
         super().__init__(title=GLib.markup_escape_text(app.name))
         self.app = app
-        self.found = found
+        self.found: list[Candidate] = []
+        self.done = False
         self.choice = 0
-        self.check = Gtk.CheckButton(valign=Gtk.Align.CENTER, active=suggested(app, self.candidate))
-        self.check.connect("toggled", lambda *_: on_toggle())
+        self.chooser: Optional[Gtk.MenuButton] = None
+        self.touched = False  # ticked or unticked by the person: a late find leaves it be
+        self._quiet = False
+        self.check = Gtk.CheckButton(valign=Gtk.Align.CENTER, sensitive=False)
+        self.check.connect("toggled", self._toggled, on_toggle)
         # Each prefix goes in front of the last: the box ends up first.
         self.add_prefix(_current_image(app))
         self.add_prefix(self.check)
         self.set_activatable_widget(self.check)
 
-        arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")
-        arrow.add_css_class("dim-label")
-        self.add_suffix(arrow)
+        self.arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")
+        self.arrow.add_css_class("dim-label")
+        self.add_suffix(self.arrow)
+        self.end = Gtk.Box(valign=Gtk.Align.CENTER)
+        self.add_suffix(self.end)
         self.picture = Gtk.Image(pixel_size=ICON)
+        if found is None:
+            self.end.append(_spinner(24))
+            self.set_subtitle(GLib.markup_escape_text(f"{app.state.text}  ·  looking…"))
+        else:
+            self.set_found(found)
+
+    def _toggled(self, _check, on_toggle) -> None:
+        if not self._quiet:
+            self.touched = True
+        on_toggle()
+
+    def set_tick(self, active: bool) -> None:
+        self._quiet = True
+        self.check.set_active(active)
+        self._quiet = False
+
+    def set_found(self, found: list[Candidate]) -> None:
+        """Show what the search found for this app."""
+        self.found, self.choice, self.done = found, 0, True
+        child = self.end.get_first_child()
+        while child is not None:
+            self.end.remove(child)
+            child = self.end.get_first_child()
+        self.chooser = None
+        if not found:
+            self.check.set_sensitive(False)
+            self.arrow.set_visible(False)
+            self.set_subtitle(GLib.markup_escape_text(f"{self.app.state.text}  ·  no icon found online"))
+            return
         if len(found) > 1:
             # Every find, to pick from: Flathub's, the website's, a theme's…
             self.chooser = Gtk.MenuButton(child=self.picture, valign=Gtk.Align.CENTER, popover=self._options())
             self.chooser.add_css_class("flat")
-            self.add_suffix(self.chooser)
+            self.end.append(self.chooser)
         else:
-            self.add_suffix(self.picture)
+            self.end.append(self.picture)
+        self.check.set_sensitive(True)
+        self.arrow.set_visible(True)
+        if not self.touched:
+            self.set_tick(suggested(self.app, self.candidate))
         self._show_choice()
 
     def _options(self) -> Gtk.Popover:
@@ -120,8 +160,10 @@ class AppRow(Adw.ActionRow):
 
     def _pick(self, _button, index: int) -> None:
         self.choice = index
-        self.chooser.popdown()
+        if self.chooser is not None:
+            self.chooser.popdown()
         self._show_choice()
+        self.touched = True
         self.check.set_active(True)
 
     def _show_choice(self) -> None:
@@ -149,21 +191,26 @@ class Window(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application) -> None:
         super().__init__(application=application, title="IconFetch", default_width=660, default_height=760)
         self.set_size_request(360, 400)
+        self.apps: list[App] = []
         self.found: dict[str, list[Candidate]] = {}
         self.rows: list[AppRow] = []
+        self.row_by_id: dict[str, AppRow] = {}
         self.list_page: Optional[Gtk.Widget] = None
+        self.nothing_group: Optional[Adw.PreferencesGroup] = None
         self.busy = False
 
         header = Adw.HeaderBar()
-        self.refresh_button = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Look again (Ctrl+R)")
-        self.refresh_button.connect("clicked", lambda *_: self.fetch())
+        self.title_widget = Adw.WindowTitle(title="IconFetch")
+        header.set_title_widget(self.title_widget)
+        self.refresh_button = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Look again online (Ctrl+R)")
+        self.refresh_button.connect("clicked", lambda *_: self.fetch(fresh=True))
         header.pack_start(self.refresh_button)
         self.apply_button = Gtk.Button(label="Apply", sensitive=False)
         self.apply_button.add_css_class("suggested-action")
         self.apply_button.connect("clicked", lambda *_: self.apply_selected())
         header.pack_end(self.apply_button)
 
-        self.progress = Adw.StatusPage(title="Looking for icons", child=_spinner())
+        self.progress = Adw.StatusPage(title="Reading your apps", child=_spinner())
         self.toasts = Adw.ToastOverlay()
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
         self.stack.add_named(self.progress, "loading")
@@ -172,7 +219,7 @@ class Window(Adw.ApplicationWindow):
         self.set_content(_frame(header, self.toasts))
 
         refresh = Gio.SimpleAction.new("refresh", None)
-        refresh.connect("activate", lambda *_: self.fetch())
+        refresh.connect("activate", lambda *_: self.fetch(fresh=True))
         self.add_action(refresh)
         undo = Gio.SimpleAction.new("undo", GLib.VariantType.new("as"))
         undo.connect("activate", lambda _action, ids: self.undo(ids.unpack()))
@@ -181,17 +228,22 @@ class Window(Adw.ApplicationWindow):
 
     # --- Looking -------------------------------------------------------------
 
-    def fetch(self) -> None:
+    def fetch(self, fresh: bool = False) -> None:
+        """List the apps at once, then fill in each one's finds as they arrive.
+
+        Finds come from the download cache when they're less than a week old;
+        `fresh` (Look again) asks every source again.
+        """
         if self.busy:
             return
         self.busy = True
         self.refresh_button.set_sensitive(False)
-        self.apply_button.set_sensitive(False)
-        self.progress.set_description("Reading installed apps…")
-        self.stack.set_visible_child_name("loading")
-        threading.Thread(target=self._fetch_all, daemon=True).start()
+        self.title_widget.set_subtitle("Looking for icons…")
+        if fresh:
+            self.found = {}
+        threading.Thread(target=self._fetch_all, args=(fresh,), daemon=True).start()
 
-    def _fetch_all(self) -> None:
+    def _fetch_all(self, fresh: bool) -> None:
         # First catch up with app updates and removals since IconFetch last looked.
         try:
             synced = sync()
@@ -199,27 +251,51 @@ class Window(Adw.ApplicationWindow):
             print(f"iconfetch: couldn't refresh its copies: {error}", file=sys.stderr)
             synced = []
         apps = installed_apps()
-        finder = Finder()
+        GLib.idle_add(self._listed, apps)
         found: dict[str, list[Candidate]] = {}
         failures: dict[str, int] = {}
-        done = 0
-        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            for app, (cands, problems) in zip(apps, pool.map(finder.candidates, apps)):
+        # Apps IconFetch hasn't changed first: those are the ones to choose for.
+        order = sorted(apps, key=lambda app: app.applied)
+        with Finder(fresh=fresh) as finder, ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            jobs = {pool.submit(finder.candidates, app): app for app in order}
+            for done, job in enumerate(as_completed(jobs), start=1):
+                app = jobs[job]
+                try:
+                    cands, problems = job.result()
+                except Exception:  # a bug in one source mustn't leave the window looking forever
+                    traceback.print_exc()
+                    cands, problems = [], []
                 found[app.id] = cands
                 for problem in problems:
                     source = problem.split(":", 1)[0]
                     failures[source] = failures.get(source, 0) + 1
-                done += 1
-                GLib.idle_add(self.progress.set_description, f"Checked {done} of {len(apps)} apps")
+                GLib.idle_add(self._found_one, app.id, cands, done, len(apps))
         # A source that failed for most apps is down or out of reach, not just missing one app.
         down = [source for source, count in failures.items() if count > len(apps) / 2]
         GLib.idle_add(self._fetched, apps, found, down, synced)
+
+    def _listed(self, apps: list[App]) -> bool:
+        self.apps = apps
+        self.show_apps(apps)
+        return False
+
+    def _found_one(self, app_id: str, cands: list[Candidate], done: int, total: int) -> bool:
+        self.found[app_id] = cands
+        row = self.row_by_id.get(app_id)
+        if row is not None:
+            row.set_found(cands)
+            if not cands and row.app.state.status not in (MISSING, GENERIC, LOWRES):
+                row.set_visible(False)  # has its own icon and nothing better: listed at the end
+        self.title_widget.set_subtitle(f"Checked {done} of {total} apps")
+        self._update_apply()
+        return False
 
     def _fetched(self, apps, found, down, synced=()) -> bool:
         self.found = found
         self.busy = False
         self.refresh_button.set_sensitive(True)
-        self.show_apps(apps)
+        self.title_widget.set_subtitle("")
+        self._fill_nothing()
         if down:
             self.toast(f"Couldn't reach {' or '.join(down)}. Showing what the other sources had.")
         if synced:
@@ -229,21 +305,21 @@ class Window(Adw.ApplicationWindow):
     # --- Showing -------------------------------------------------------------
 
     def show_apps(self, apps: Optional[list[App]] = None) -> None:
-        """Lay out the apps; reuses what was found, so it's quick after applying or undoing."""
+        """Lay out the apps by the icon they show now. Rows still being looked up show a spinner;
+        ticks and choices carry over, so it's safe after applying or undoing."""
         apps = apps if apps is not None else installed_apps()
-        self.rows = []
+        self.apps = apps
+        kept = {row.app.id: (row.touched, row.check.get_active(), row.choice) for row in self.rows}
+        self.rows, self.row_by_id = [], {}
         page = Adw.PreferencesPage()
 
         applied = [a for a in apps if a.applied]
-        offered = [a for a in apps if not a.applied and self.found.get(a.id)]
-        needs = [a for a in offered if a.state.status in (MISSING, GENERIC, LOWRES)]
-        better = [a for a in offered if a not in needs]
-        nothing = [a for a in apps if not a.applied and not self.found.get(a.id)]
-
+        needs = [a for a in apps if not a.applied and a.state.status in (MISSING, GENERIC, LOWRES)]
+        own = [a for a in apps if not a.applied and a not in needs]
         if needs:
-            page.add(self._group("Needs a better icon", "These show a stand-in or a blurry icon now.", needs))
-        if better:
-            page.add(self._group("Official icon available", "These have an icon already. Tick any you'd rather swap.", better))
+            page.add(self._group("Needs a better icon", "These show a stand-in or a blurry icon now.", needs, kept))
+        if own:
+            page.add(self._group("Has its own icon", "Tick any you'd rather swap for one found online.", own, kept))
         if applied:
             group = Adw.PreferencesGroup(title="Changed by IconFetch")
             undo_all = Gtk.Button(label="Undo all", valign=Gtk.Align.CENTER)
@@ -253,55 +329,71 @@ class Window(Adw.ApplicationWindow):
             for app in applied:
                 group.add(AppliedRow(app, self.undo))
             page.add(group)
-        if nothing:
-            group = Adw.PreferencesGroup()
-            expander = Adw.ExpanderRow(
-                title=f"No icon found for {len(nothing)} app{'s' * (len(nothing) != 1)}",
-                subtitle="No app store, website or icon collection had one",
-            )
-            for app in nothing:
-                row = Adw.ActionRow(title=GLib.markup_escape_text(app.name), subtitle=GLib.markup_escape_text(app.state.text))
-                row.add_prefix(_current_image(app))
-                expander.add_row(row)
-            group.add(expander)
-            page.add(group)
-
-        if not (needs or better or applied):
-            page = Adw.StatusPage(
-                icon_name="emblem-ok-symbolic",
-                title="Nothing to fetch",
-                description="No official icons were found for your apps.",
-            )
+        self.nothing_group = Adw.PreferencesGroup()
+        page.add(self.nothing_group)
 
         old, self.list_page = self.list_page, page
         self.stack.add_child(page)
         self.stack.set_visible_child(page)
         if old is not None:
             self.stack.remove(old)
+        if not self.busy:
+            self._fill_nothing()
         self._update_apply()
 
-    def _group(self, title: str, description: str, apps: list[App]) -> Adw.PreferencesGroup:
+    def _group(self, title: str, description: str, apps: list[App], kept: dict) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title=title, description=description)
-        rows = [AppRow(app, self.found[app.id], self._update_apply) for app in apps]
+        rows = []
+        for app in apps:
+            row = AppRow(app, self.found.get(app.id), self._update_apply)
+            if app.id in kept:
+                row.touched, active, choice = kept[app.id]
+                if row.found and choice < len(row.found):
+                    row.choice = choice
+                    row._show_choice()
+                if row.touched:
+                    row.set_tick(active and bool(row.found))
+            if row.done and not row.found and title == "Has its own icon":
+                row.set_visible(False)
+            rows.append(row)
         toggle = Gtk.Button(label="Select all", valign=Gtk.Align.CENTER)
         toggle.add_css_class("flat")
 
         def flip(*_):
-            on = not all(r.check.get_active() for r in rows)
-            for row in rows:
+            ready = [r for r in rows if r.found and r.get_visible()]
+            on = not all(r.check.get_active() for r in ready)
+            for row in ready:
                 row.check.set_active(on)
 
         toggle.connect("clicked", flip)
         group.set_header_suffix(toggle)
         for row in rows:
             group.add(row)
+            self.row_by_id[row.app.id] = row
         self.rows += rows
         return group
+
+    def _fill_nothing(self) -> None:
+        """Apps that have their own icon and got no finds: one line at the end, not a row each."""
+        if self.nothing_group is None:
+            return
+        nothing = [r.app for r in self.rows if r.done and not r.found and not r.get_visible()]
+        if not nothing:
+            return
+        expander = Adw.ExpanderRow(
+            title=f"No icon found for {len(nothing)} app{'s' * (len(nothing) != 1)}",
+            subtitle="They keep their own; no app store, website or icon collection had another",
+        )
+        for app in nothing:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(app.name), subtitle=GLib.markup_escape_text(app.state.text))
+            row.add_prefix(_current_image(app))
+            expander.add_row(row)
+        self.nothing_group.add(expander)
 
     def _update_apply(self) -> None:
         count = sum(row.selected for row in self.rows)
         self.apply_button.set_label(f"Apply {count}" if count else "Apply")
-        self.apply_button.set_sensitive(count > 0 and not self.busy)
+        self.apply_button.set_sensitive(count > 0)
 
     # --- Changing ------------------------------------------------------------
 

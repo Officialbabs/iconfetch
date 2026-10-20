@@ -40,6 +40,11 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.3.0" date="2026-10-20">
+      <description>
+        <p>Much faster: the app list shows at once and fills in as icons are found, finds are remembered for a week so IconFetch opens in seconds, and the first search takes about a quarter of the time it did.</p>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-10-20">
       <description>
         <p>IconFetch's changes now follow your apps: when an app updates, its icon stays; when an app is uninstalled, its launcher goes with it instead of being left behind. This happens in the background within seconds of an install, update or removal.</p>

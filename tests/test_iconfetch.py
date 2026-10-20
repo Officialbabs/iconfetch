@@ -1,9 +1,12 @@
 """IconFetch tests. Every test runs in its own XDG data folders: nothing touches the real desktop."""
 
 import base64
+import http.server
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -11,7 +14,8 @@ from pathlib import Path
 from iconfetch import apps as apps_mod
 from iconfetch.apps import GENERIC, LOWRES, MISSING, OWN, IconIndex, exec_program, installed_apps
 from iconfetch.install import REMOVED, RESTORED, UPDATED, apply, icons_dir, revert, suggested, sync
-from iconfetch.sources import BRANDS, FLATHUB, PAPIRUS, SNAP, Candidate, Finder, IconLinks, _icon_urls, folder_candidates, to_png
+from iconfetch import sources
+from iconfetch.sources import BRANDS, FLATHUB, PAPIRUS, SNAP, Candidate, Finder, IconLinks, Web, _icon_urls, folder_candidates, to_png
 
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#f60"/></svg>'
 WIDE_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#06f"/></svg>'
@@ -41,8 +45,9 @@ class Sandbox(unittest.TestCase):
         for name in ("glycin-loaders", "mime"):
             if Path("/usr/share", name).is_dir():
                 (loaders / name).symlink_to(Path("/usr/share", name))
-        self.env = {k: os.environ.get(k) for k in ("XDG_DATA_HOME", "XDG_DATA_DIRS", "XDG_CURRENT_DESKTOP")}
+        self.env = {k: os.environ.get(k) for k in ("XDG_DATA_HOME", "XDG_DATA_DIRS", "XDG_CURRENT_DESKTOP", "XDG_CACHE_HOME")}
         os.environ["XDG_DATA_HOME"] = str(self.home)
+        os.environ["XDG_CACHE_HOME"] = str(root / "cache")
         os.environ["XDG_DATA_DIRS"] = f"{self.system}:{loaders}"
         os.environ["XDG_CURRENT_DESKTOP"] = "Ada"
 
@@ -417,6 +422,166 @@ class Matching(Sandbox):
         found, problems = Finder(broken).candidates(self.app("org.example.App.desktop"))
         self.assertEqual([c.source for c in found], ["Papirus theme"])
         self.assertEqual(problems, ["Flathub: no route to host"])
+
+
+class Downloads(Sandbox):
+    """The download layer: one download per thing, kept on disk, over kept-alive connections."""
+
+    def counting(self, answer=b"data", delay=0.0):
+        calls = []
+
+        def fetch(url, body=None, headers=None):
+            calls.append(url)
+            time.sleep(delay)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        return fetch, calls
+
+    def test_threads_asking_at_once_share_one_download(self):
+        fetch, calls = self.counting(delay=0.2)
+        web = Web(fetch)
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(web.get("https://x/index.json"))) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(results, [b"data"] * 8)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_failure_is_shared_too_and_not_kept(self):
+        fetch, calls = self.counting(answer=urllib.error.URLError("timed out"), delay=0.2)
+        web = Web(fetch)
+        errors = []
+
+        def ask():
+            try:
+                web.get("https://x/slow")
+            except OSError as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=ask) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual((len(errors), len(calls)), (5, 1))
+        fetch2, calls2 = self.counting()
+        self.assertEqual(Web(fetch2).get("https://x/slow"), b"data")  # the next scan tries again
+
+    def test_the_next_scan_reads_from_disk_and_look_again_does_not(self):
+        fetch, calls = self.counting()
+        Web(fetch).get("https://x/a.png")
+        Web(fetch).get("https://x/a.png")
+        self.assertEqual(len(calls), 1)
+        Web(fetch, fresh=True).get("https://x/a.png")
+        self.assertEqual(len(calls), 2)
+
+    def test_old_downloads_expire_and_misses_expire_sooner(self):
+        fetch, calls = self.counting()
+        Web(fetch).get("https://x/a.png")
+        for entry in sources.cache_dir().iterdir():
+            os.utime(entry, (time.time() - 8 * 86400,) * 2)
+        Web(fetch).get("https://x/a.png")
+        self.assertEqual(len(calls), 2)
+
+        missing, missed = self.counting(answer=urllib.error.HTTPError("https://x/b", 404, "Not Found", {}, None))
+        self.assertIsNone(Web(missing).get("https://x/b"))
+        self.assertIsNone(Web(missing).get("https://x/b"))
+        self.assertEqual(len(missed), 1)
+        for entry in sources.cache_dir().glob("*.missing"):
+            os.utime(entry, (time.time() - 2 * 86400,) * 2)
+        Web(missing).get("https://x/b")
+        self.assertEqual(len(missed), 2)
+
+    def test_the_website_is_only_asked_when_no_store_has_the_icon(self):
+        self.system_entry("org.example.App.desktop", entry("Example", icon="org.example.App"))
+        listing = {"icons": [{"url": "https://dl/a.png", "width": 128}], "urls": {"homepage": "https://example.org/"}}
+        web = FakeWeb({f"{FLATHUB}/search": {"hits": []}, f"{FLATHUB}/appstream/org.example.App": listing, "https://dl/a.png": SVG})
+        with Finder(web) as finder:
+            found, _problems = finder.candidates(self.app("org.example.App.desktop"))
+        self.assertEqual([c.source for c in found], ["Flathub"])
+        self.assertNotIn("https://example.org/", web.asked)
+
+        self.system_entry("other.desktop", entry("Other Thing", exec_line="/nonexistent/other"))
+        web = FakeWeb({})
+        with Finder(web) as finder:
+            finder.candidates(self.app("other.desktop"))
+        self.assertTrue(any(url.startswith(SNAP) for url in web.asked))
+
+
+class KeptAlive(unittest.TestCase):
+    """The real HTTP client, against a local server."""
+
+    def setUp(self):
+        self.connections = 0
+        test = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def setup(self):
+                test.connections += 1
+                super().setup()
+
+            def reply(self, code, body=b"", headers=()):
+                self.send_response(code)
+                for key, value in headers:
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if self.path == "/moved":
+                    self.reply(301, headers=[("Location", "/here")])
+                elif self.path == "/here":
+                    self.reply(200, b"arrived")
+                elif self.path.startswith("/n/"):
+                    self.reply(200, self.path.encode())
+                elif self.path == "/then-hang-up":
+                    self.reply(200, b"bye")
+                    self.close_connection = True  # without saying so, as an idle timeout does
+                else:
+                    self.reply(404, b"no")
+
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                self.reply(200, self.rfile.read(length))
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.saved = {var: os.environ.pop(var) for var in sources.PROXY_VARS if var in os.environ}
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        os.environ.update(self.saved)
+        sources._local.__dict__.pop("connections", None)
+
+    def test_one_connection_serves_many_requests(self):
+        for n in range(5):
+            self.assertEqual(sources._request(f"{self.base}/n/{n}"), f"/n/{n}".encode())
+        self.assertEqual(self.connections, 1)
+
+    def test_redirects_errors_and_posts(self):
+        self.assertEqual(sources._request(f"{self.base}/moved"), b"arrived")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            sources._request(f"{self.base}/nothing")
+        self.assertEqual(caught.exception.code, 404)
+        self.assertEqual(json.loads(sources._request(f"{self.base}/search", {"query": "vlc"})), {"query": "vlc"})
+
+    def test_a_connection_the_server_closed_is_reopened(self):
+        self.assertEqual(sources._request(f"{self.base}/then-hang-up"), b"bye")
+        time.sleep(0.1)
+        self.assertEqual(sources._request(f"{self.base}/n/2"), b"/n/2")
+        self.assertEqual(self.connections, 2)
 
 
 class AppFolder(Sandbox):

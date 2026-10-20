@@ -1,7 +1,7 @@
 """IconFetch.
 
   iconfetch                 open the window
-  iconfetch list            show every app, its icon and what IconFetch found
+  iconfetch list            show every app, its icon and what IconFetch found (--fresh: look online again)
   iconfetch apply [ID…]     apply the suggested icons (or the best find for each ID)
   iconfetch revert [ID…]    put back the original icons (all of IconFetch's changes without IDs)
   iconfetch refresh         catch up with app updates and removals (runs by itself after installs)
@@ -14,7 +14,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 
-def _scan(ids: list[str]):
+def _scan(ids: list[str], fresh: bool = False):
     from .apps import installed_apps
     from .sources import Finder
 
@@ -25,8 +25,7 @@ def _scan(ids: list[str]):
         missing = wanted - {a.id for a in apps}
         for desktop_id in sorted(missing):
             print(f"{desktop_id}: no such app", file=sys.stderr)
-    finder = Finder()
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with Finder(fresh=fresh) as finder, ThreadPoolExecutor(max_workers=16) as pool:
         results = list(pool.map(finder.candidates, apps))
     return apps, results
 
@@ -34,7 +33,7 @@ def _scan(ids: list[str]):
 def cmd_list(args) -> int:
     from .install import suggested
 
-    apps, results = _scan(args.ids)
+    apps, results = _scan(args.ids, args.fresh)
     for app, (found, problems) in zip(apps, results):
         best = found[0] if found else None
         mark = "*" if suggested(app, best) else ("✓" if app.applied else " ")
@@ -51,7 +50,7 @@ def cmd_list(args) -> int:
 def cmd_apply(args) -> int:
     from .install import apply, suggested
 
-    apps, results = _scan(args.ids)
+    apps, results = _scan(args.ids, args.fresh)
     done = 0
     for app, (found, problems) in zip(apps, results):
         best = found[0] if found else None
@@ -104,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     ):
         sub = commands.add_parser(name, help=text)
         sub.add_argument("ids", nargs="*", metavar="ID", help="desktop ID, e.g. firefox_firefox")
+        if name in ("list", "apply"):
+            sub.add_argument("--fresh", action="store_true", help="look online again instead of using finds from the last week")
         sub.set_defaults(handler=handler)
     args = parser.parse_args(argv)
     if args.command:

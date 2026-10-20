@@ -9,14 +9,19 @@ names Adwaita dropped.
 
 from __future__ import annotations
 
+import hashlib
+import http.client
 import json
 import os
 import re
+import socket
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ElementTree
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -37,7 +42,7 @@ BRANDS = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons"
 PAPIRUS = "https://raw.githubusercontent.com/PapirusDevelopmentTeam/papirus-icon-theme/master/Papirus/64x64/apps"
 # Some sites turn away clients that don't look like a browser.
 USER_AGENT = f"Mozilla/5.0 (X11; Linux x86_64) IconFetch/{__version__}"
-TIMEOUT = 12
+TIMEOUT = 10
 SIZE = 256  # pixels: what IconFetch stores and applies
 MAX_DOWNLOAD = 4 * 1024 * 1024
 MIN_WEB_ICON = 96  # a site's favicon below this is too small for a dock
@@ -122,8 +127,75 @@ def _square(pixbuf: GdkPixbuf.Pixbuf) -> GdkPixbuf.Pixbuf:
 
 Fetch = Callable[..., bytes]  # (url, body=None, headers=None) -> bytes
 
+PROXY_VARS = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY")
+REDIRECTS = 5
+_local = threading.local()
+
 
 def _request(url: str, body: Optional[dict] = None, headers: Optional[dict] = None) -> bytes:
+    """GET (or POST `body` as JSON), following redirects, over a kept-alive connection.
+
+    Opening a connection costs several round trips; on a slow link that is
+    most of a request, so each thread keeps one open per host.
+    """
+    if any(os.environ.get(var) for var in PROXY_VARS):
+        return _request_via_urllib(url, body, headers)
+    data = json.dumps(body).encode() if body is not None else None
+    sent = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity", **(headers or {})}
+    if data is not None:
+        sent["Content-Type"] = "application/json"
+    for _hop in range(REDIRECTS + 1):
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(f"can't download {url}")
+        target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        response, payload = _exchange(parts, "GET" if data is None else "POST", target, data, sent)
+        location = response.getheader("Location")
+        if response.status in (301, 302, 303, 307, 308) and location:
+            url = urllib.parse.urljoin(url, location)
+            if response.status in (301, 302, 303):
+                data = None
+                sent.pop("Content-Type", None)
+            continue
+        if response.status >= 400:
+            raise urllib.error.HTTPError(url, response.status, response.reason, response.msg, None)
+        return payload
+    raise ValueError(f"{url}: too many redirects")
+
+
+def _exchange(parts, method: str, target: str, data: Optional[bytes], headers: dict):
+    """One request on this thread's connection to the host, opening one if there isn't one."""
+    pool = _local.__dict__.setdefault("connections", {})
+    key = (parts.scheme, parts.hostname, parts.port)
+    for attempt in range(2):
+        connection = pool.get(key)
+        reused = connection is not None
+        if connection is None:
+            kind = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+            connection = pool[key] = kind(parts.hostname, parts.port, timeout=TIMEOUT)
+        try:
+            connection.request(method, target, body=data, headers=headers)
+            response = connection.getresponse()
+            payload = response.read(MAX_DOWNLOAD + 1)
+        except (http.client.HTTPException, OSError) as error:
+            connection.close()
+            pool.pop(key, None)
+            if reused and attempt == 0 and not isinstance(error, (TimeoutError, socket.timeout)):
+                continue  # the server had closed the idle connection: once more on a new one
+            if isinstance(error, http.client.HTTPException):
+                raise urllib.error.URLError(error) from None
+            raise
+        if len(payload) > MAX_DOWNLOAD or response.will_close:
+            connection.close()
+            pool.pop(key, None)
+        if len(payload) > MAX_DOWNLOAD:
+            raise ValueError(f"{parts.geturl()} is larger than {MAX_DOWNLOAD} bytes")
+        return response, payload
+    raise AssertionError("unreachable")
+
+
+def _request_via_urllib(url: str, body: Optional[dict] = None, headers: Optional[dict] = None) -> bytes:
+    """The plain way, which honours proxy settings."""
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(url, data=data, headers={"User-Agent": USER_AGENT, **(headers or {})})
     if data is not None:
@@ -135,29 +207,99 @@ def _request(url: str, body: Optional[dict] = None, headers: Optional[dict] = No
     return payload
 
 
-class Web:
-    """Downloads, kept for the length of one scan. Not found (any 4xx but 429) is None."""
+CACHE_DAYS = 7  # what was found
+MISS_DAYS = 1  # what wasn't there (a 404)
+PRUNE_DAYS = 30
 
-    def __init__(self, fetch: Fetch = _request) -> None:
+
+def cache_dir() -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "iconfetch" / "web"
+
+
+class Web:
+    """Downloads, kept on disk for a week so the next scan is quick. Not found (any 4xx but 429) is None.
+
+    Several threads asking for the same thing at once share one download.
+    `fresh` ignores what's on disk (and saves what it gets), for "Look again".
+    """
+
+    def __init__(self, fetch: Fetch = _request, cached: bool = True, fresh: bool = False) -> None:
         self.fetch = fetch
-        self._cache: dict[tuple, Optional[bytes]] = {}
+        self.cached = cached
+        self.fresh = fresh
+        self._memory: dict[tuple, Optional[bytes]] = {}
+        self._failed: dict[tuple, BaseException] = {}
+        self._pending: dict[tuple, threading.Event] = {}
         self._lock = threading.Lock()
+        if cached:
+            _prune(cache_dir())
 
     def get(self, url: str, body: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[bytes]:
         key = (url, json.dumps(body, sort_keys=True) if body is not None else None)
-        with self._lock:
-            if key in self._cache:
-                return self._cache[key]
+        while True:
+            with self._lock:
+                if key in self._memory:
+                    return self._memory[key]
+                if key in self._failed:
+                    raise self._failed[key]
+                waiting = self._pending.get(key)
+                if waiting is None:
+                    self._pending[key] = threading.Event()
+                    break
+            waiting.wait()
         try:
-            data = self.fetch(url, body, headers)
-        except urllib.error.HTTPError as error:
-            error.close()
-            if not 400 <= error.code < 500 or error.code == 429:
-                raise
-            data = None
-        with self._lock:
-            self._cache[key] = data
-        return data
+            found, data = self._read_disk(key) if self.cached and not self.fresh else (False, None)
+            if not found:
+                try:
+                    data = self.fetch(url, body, headers)
+                except urllib.error.HTTPError as error:
+                    error.close()
+                    if not 400 <= error.code < 500 or error.code == 429:
+                        raise
+                    data = None
+                if self.cached:
+                    self._write_disk(key, data)
+            with self._lock:
+                self._memory[key] = data
+            return data
+        except (OSError, ValueError) as error:
+            with self._lock:
+                self._failed[key] = error
+            raise
+        finally:
+            with self._lock:
+                self._pending.pop(key).set()
+
+    def _paths(self, key: tuple) -> tuple[Path, Path]:
+        name = hashlib.sha256(json.dumps(key).encode()).hexdigest()
+        return cache_dir() / name, cache_dir() / f"{name}.missing"
+
+    def _read_disk(self, key: tuple) -> tuple[bool, Optional[bytes]]:
+        hit, miss = self._paths(key)
+        now = time.time()
+        try:
+            if now - hit.stat().st_mtime < CACHE_DAYS * 86400:
+                return True, hit.read_bytes()
+        except OSError:
+            pass
+        try:
+            if now - miss.stat().st_mtime < MISS_DAYS * 86400:
+                return True, None
+        except OSError:
+            pass
+        return False, None
+
+    def _write_disk(self, key: tuple, data: Optional[bytes]) -> None:
+        hit, miss = self._paths(key)
+        target, other = (miss, hit) if data is None else (hit, miss)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_bytes(data or b"")
+            os.replace(tmp, target)
+            other.unlink(missing_ok=True)
+        except OSError:
+            pass  # a cache that can't be written only makes the next scan slower
 
     def json(self, url: str, body: Optional[dict] = None, headers: Optional[dict] = None):
         data = self.get(url, body, headers)
@@ -174,16 +316,38 @@ class Web:
             return None
 
 
+def _prune(folder: Path) -> None:
+    """Forget downloads nobody has asked for in a month."""
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return
+    oldest = time.time() - PRUNE_DAYS * 86400
+    for entry in entries:
+        try:
+            if entry.stat().st_mtime < oldest or entry.name.endswith(".tmp") and entry.stat().st_mtime < time.time() - 3600:
+                entry.unlink()
+        except OSError:
+            pass
+
+
 # --- Finding ----------------------------------------------------------------
+
+SOURCE_WORKERS = 32
 
 
 class Finder:
-    """Looks for an app's icon in every source. One per scan: it keeps what it downloaded."""
+    """Looks for an app's icon in every source. One per scan: it keeps what it downloaded.
 
-    def __init__(self, fetch: Fetch = _request) -> None:
-        self.web = Web(fetch)
+    Sources run side by side on a shared pool of threads, so each thread's
+    open connections serve many apps. Close it (or use `with`) when done.
+    """
+
+    def __init__(self, fetch: Fetch = _request, cached: bool = True, fresh: bool = False) -> None:
+        self.web = Web(fetch, cached=cached, fresh=fresh)
         self._homepages: Optional[dict[str, str]] = None
         self._lock = threading.Lock()
+        self._pool: Optional[ThreadPoolExecutor] = None
         self.sources = (
             ("Flathub", self.flathub),
             ("Snap Store", self.snap),
@@ -193,16 +357,37 @@ class Finder:
             ("Papirus", self.papirus),
         )
 
+    def __enter__(self) -> "Finder":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def _run(self, name: str, source, app: App, homepages: list[str]):
+        try:
+            return source(app, homepages), None
+        except (OSError, ValueError) as error:
+            return [], f"{name}: {getattr(error, 'reason', None) or error}"
+
     def candidates(self, app: App) -> tuple[list[Candidate], list[str]]:
         """Every icon found for the app, most official first, and the sources that couldn't be reached."""
-        found: list[Candidate] = []
-        problems = []
+        with self._lock:
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=SOURCE_WORKERS, thread_name_prefix="iconfetch")
         homepages: list[str] = []
-        for name, source in self.sources:
-            try:
-                found += source(app, homepages)
-            except (OSError, ValueError) as error:
-                problems.append(f"{name}: {getattr(error, 'reason', None) or error}")
+        jobs = {name: self._pool.submit(self._run, name, source, app, homepages)
+                for name, source in self.sources if name != "Website"}
+        results = {name: job.result() for name, job in jobs.items()}
+        # The app's own site only when no store had its icon: sites are the
+        # slowest source and the least sure to show the app's icon.
+        if not (results["Flathub"][0] or results["Snap Store"][0]):
+            results["Website"] = self._pool.submit(self._run, "Website", self.website, app, homepages).result()
+        found = [cand for name, _source in self.sources for cand in results.get(name, ([], None))[0]]
+        problems = [results[name][1] for name, _source in self.sources if name in results and results[name][1]]
         unique: dict[bytes, Candidate] = {}
         for cand in found:
             unique.setdefault(cand.png, cand)
