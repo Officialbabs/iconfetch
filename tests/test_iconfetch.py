@@ -758,10 +758,17 @@ class SameShapePack(Sandbox):
         self.assertEqual(report.folder, pack)
         self.assertEqual(json.loads((pack / "pack.json").read_text())["name"], "Same shape")
         made = sorted(p.name for p in (pack / "icons").iterdir())
-        self.assertEqual(made, sorted(["org.example.Tri.png", "ada-thing.png", f"{self.long_id}.png"]))
-        # Already in the shape: left out, so Ada shows its own icon.
+        # Already in the shape: held as it is (an SVG drawn as a PNG, since Qt drops its clip paths).
+        self.assertEqual(made, sorted(["org.example.Tri.png", "ada-thing.png", f"{self.long_id}.png", "org.example.Ready.png"]))
         self.assertEqual(report.as_is, ["Ready"])
         self.assertEqual(report.left_out, [("Nothing", "no icon")])
+
+    def test_a_png_already_in_the_shape_is_held_byte_for_byte(self):
+        png, _ = to_png(IN_SHAPE)
+        self.picture(png, "ready.png")
+        self.system_entry("org.example.Ready.desktop", entry("Ready", icon=str(self.home / "ready.png")))
+        shapes.build()
+        self.assertEqual((self.home / "ada/icon-packs" / shapes.PACK_ID / "icons/org.example.Ready.png").read_bytes(), png)
 
     def test_another_shape_remakes_the_pack_in_it_and_refreshes_keep_it(self):
         shapes.build()
@@ -790,11 +797,12 @@ class SameShapePack(Sandbox):
         self.assertEqual(sorted(report.made), ["Triangle", "Windows App"])
         self.assertFalse((pack / "ada-thing.png").exists())
 
-        self.picture(IN_SHAPE, "triangle.svg")  # now in the shape: its picture goes
+        self.picture(IN_SHAPE, "triangle.svg")  # now in the shape: held as it is instead
         os.utime(self.home / "triangle.svg", ns=(2, 2))
         report = shapes.refresh()
         self.assertEqual(sorted(report.as_is), ["Ready", "Triangle", "Windows App"])
-        self.assertEqual(list(pack.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in pack.iterdir()),
+                         sorted(["org.example.Ready.png", "org.example.Tri.png", f"{self.long_id}.png"]))
 
     def test_without_a_pack_refresh_does_nothing(self):
         self.assertIsNone(shapes.refresh())

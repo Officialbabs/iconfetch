@@ -3,7 +3,7 @@
 Three shapes to choose from: Ada's own (a rounded square, |x|^5 + |y|^5 = 1,
 82% the width of the picture, no shadow), macOS's (Apple's app icon template:
 continuous corners, 824 of 1024 pixels, a soft shadow) and a full circle. An
-icon already in the shape and size is left as it is (the pack leaves it out).
+icon already in the shape and size is left as it is (the pack holds it unchanged).
 One in the shape at another size is only resized. A tile of another outline (a
 sharp square, a round badge of one colour) is cut to the shape, its corners
 filled in its own edge colour. Any other shape (a triangle, a gear, a folder) is
@@ -33,7 +33,7 @@ from .sources import decode
 SIZE = 256  # pixels of each icon in the pack
 DRAWN = 512  # pixels a source is drawn at before it's fitted to the tile
 LOOKED = 128  # pixels a source is looked at to tell its shape
-STYLE = 3  # bump when the drawing changes: every icon is made again
+STYLE = 5  # bump when the drawing changes: every icon is made again
 
 KEEP, RESIZE, CUT, SET = "keep", "resize", "cut", "set"
 # Ada's own apps take their pictures from the desktop's own folder, by icon name.
@@ -486,7 +486,7 @@ class Report:
     folder: Path
     made: list[str] = field(default_factory=list)  # app names: icons drawn now
     unchanged: list[str] = field(default_factory=list)  # drawn before, from the same source
-    as_is: list[str] = field(default_factory=list)  # already in the shape: left out, so Ada shows their own
+    as_is: list[str] = field(default_factory=list)  # already in the shape: in the pack as they are
     left_out: list[tuple[str, str]] = field(default_factory=list)  # app name, why
 
     @property
@@ -523,12 +523,11 @@ def _build(folder: Path, plain: bool, apps: Optional[list[App]], progress, form:
     same = (manifest.get("folder") == str(folder) and manifest.get("style") == STYLE and manifest.get("plain") == plain
             and manifest.get("form") == form)
     made_before = manifest.get("icons", {}) if same else {}
-    as_is_before = set(manifest.get("as_is", [])) if same else set()
 
     icons = folder / "icons"
     icons.mkdir(parents=True, exist_ok=True)
     _write_json(folder / "pack.json", pack_about(form))
-    report, made_now, as_is = Report(folder), {}, []
+    report, made_now = Report(folder), {}
     for done, app in enumerate(apps, start=1):
         if progress:
             progress(done, len(apps))
@@ -541,44 +540,55 @@ def _build(folder: Path, plain: bool, apps: Optional[list[App]], progress, form:
         except OSError:
             report.left_out.append((app.name, "icon file missing"))
             continue
-        target = icons / f"{app.stem}.png"
         signature = [path, stat.st_mtime_ns, stat.st_size]
-        if made_before.get(app.id) == signature and (app.id in as_is_before or target.is_file()):
-            made_now[app.id] = signature
-            if app.id in as_is_before:
-                as_is.append(app.id)
-                report.as_is.append(app.name)
-            else:
-                report.unchanged.append(app.name)
+        before = made_before.get(app.id) or {}
+        if before.get("source") == signature and before.get("file") and (icons / before["file"]).is_file():
+            made_now[app.id] = before
+            (report.as_is if before.get("as_is") else report.unchanged).append(app.name)
             continue
         try:
             pixbuf = render(path, plain=plain, form=form)
             if pixbuf is None:
-                made_now[app.id] = signature
-                as_is.append(app.id)
-                report.as_is.append(app.name)
-                continue
-            ok, png = pixbuf.save_to_bufferv("png", [], [])
-            if not ok:
-                raise ValueError("could not encode PNG")
+                # In the shape already: the pack holds it as it is. Ada shows it unchanged, and knows
+                # it brings its own shape.
+                name, data = _unchanged(app, path)
+            else:
+                ok, png = pixbuf.save_to_bufferv("png", [], [])
+                if not ok:
+                    raise ValueError("could not encode PNG")
+                name, data = f"{app.stem}.png", bytes(png)
             # Written here, not by GdkPixbuf: its saver turns down long names (Windows apps' IDs are).
-            temporary = icons / f".{target.name}.tmp"
-            temporary.write_bytes(bytes(png))
-            os.replace(temporary, target)
+            temporary = icons / f".{name}.tmp"
+            temporary.write_bytes(data)
+            os.replace(temporary, icons / name)
         except (OSError, ValueError, GLib.Error) as error:
             report.left_out.append((app.name, str(getattr(error, "message", error))))
             continue
-        made_now[app.id] = signature
-        report.made.append(app.name)
+        made_now[app.id] = {"source": signature, "file": name, "as_is": pixbuf is None}
+        (report.as_is if pixbuf is None else report.made).append(app.name)
 
-    # Apps uninstalled since, and icons in the shape now: their pictures go.
-    wanted = {f"{desktop_id.removesuffix('.desktop')}.png" for desktop_id in made_now if desktop_id not in as_is}
-    for old in icons.glob("*.png"):
-        if old.name not in wanted:
+    # Apps uninstalled since, and pictures of another kind now (an icon that came into shape): they go.
+    wanted = {entry["file"] for entry in made_now.values()}
+    for old in icons.iterdir():
+        if old.suffix in (".png", ".svg") and old.name not in wanted:
             old.unlink(missing_ok=True)
-    manifest.update(folder=str(folder), style=STYLE, plain=plain, form=form, icons=made_now, as_is=sorted(as_is))
+    manifest.pop("as_is", None)
+    manifest.update(folder=str(folder), style=STYLE, plain=plain, form=form, icons=made_now)
     _write_json(manifest_path(), manifest)
     return report
+
+
+def _unchanged(app: App, path: str) -> tuple[str, bytes]:
+    """An icon's own picture for the pack: a PNG as it is; anything else drawn as a PNG. Qt draws SVGs
+    without their clip paths, and Ada's own app icons round their corners with one."""
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if Path(path).suffix.lower() != ".png":
+        ok, png = decode(data, SIZE)[0].save_to_bufferv("png", [], [])
+        if not ok:
+            raise ValueError("could not encode PNG")
+        data = bytes(png)
+    return f"{app.stem}.png", data
 
 
 def refresh() -> Optional[Report]:
