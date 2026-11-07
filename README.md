@@ -59,6 +59,24 @@ within seconds of an app folder changing, and once at sign-in. Elsewhere, a
 sign-in entry runs it. It also runs whenever you open IconFetch, and as
 `iconfetch refresh`.
 
+## One shape for every icon
+
+On the Ada desktop, IconFetch can also give every app's icon the same rounded
+tile, so the dock reads as one set. Each app keeps its own picture. An icon
+that already is a tile (a rounded square, or a round badge of one colour) is cut
+to the shared outline, its corners filled in its own edge colour. Any other
+shape (a triangle, a gear, a folder) is set on a tile washed in its own colour.
+
+Turn it on with **Same Shape Icons** in the window's menu, or `iconfetch shape`.
+The icons go into an icon pack, `~/.local/share/ada/icon-packs/iconfetch-same-shape`,
+and the look you're wearing switches to it. Undo, or `iconfetch shape --off`,
+puts back the icons the look wore before. The pack keeps up with installs,
+removals and new icons through the same refresh as above. `--plain` sets the
+odd shapes on grey tiles instead.
+
+Elsewhere, `iconfetch shape` writes the same pictures, named by desktop ID, to
+`~/.local/share/iconfetch/same-shape`.
+
 ## Install
 
 On any distribution:
@@ -106,6 +124,7 @@ iconfetch apply         # apply the ticked-by-default ones without the window
 iconfetch apply vlc     # apply the best find for specific apps (desktop IDs)
 iconfetch revert        # put every original icon back (or: iconfetch revert vlc)
 iconfetch refresh       # catch up with app updates and removals (runs by itself)
+iconfetch shape         # every app's icon on one rounded tile, on Ada (--off puts the old ones back)
 ```
 
 ## Packaging

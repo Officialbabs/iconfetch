@@ -1,9 +1,13 @@
 """IconFetch tests. Every test runs in its own XDG data folders: nothing touches the real desktop."""
 
+import atexit
 import base64
+import contextlib
 import http.server
+import io
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -12,15 +16,27 @@ import urllib.error
 from pathlib import Path
 
 from iconfetch import apps as apps_mod
+from iconfetch.__main__ import main
 from iconfetch.apps import GENERIC, LOWRES, MISSING, OWN, IconIndex, exec_program, installed_apps
 from iconfetch.install import REMOVED, RESTORED, UPDATED, apply, icons_dir, revert, suggested, sync
-from iconfetch import sources
+from iconfetch import shapes, sources
 from iconfetch.sources import BRANDS, FLATHUB, PAPIRUS, SNAP, Candidate, Finder, IconLinks, Web, _icon_urls, folder_candidates, to_png
 
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#f60"/></svg>'
 WIDE_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#06f"/></svg>'
 # 1×1 transparent PNG
 PNG_1PX = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+
+
+# GdkPixbuf's glycin loaders (SVG among them) and the MIME database they sniff
+# with are found through XDG_DATA_DIRS. GLib reads it once, the first time it's
+# needed, and checks the MIME database again every few seconds: one folder of
+# them for the whole run, so a test's folder being deleted can't take them away.
+LOADERS = Path(tempfile.mkdtemp(prefix="iconfetch-loaders-"))
+for _name in ("glycin-loaders", "mime"):
+    if Path("/usr/share", _name).is_dir():
+        (LOADERS / _name).symlink_to(Path("/usr/share", _name))
+atexit.register(shutil.rmtree, LOADERS, True)
 
 
 def entry(name, icon=None, exec_line="app", extra=""):
@@ -38,17 +54,10 @@ class Sandbox(unittest.TestCase):
         self.system = root / "system"
         for d in (self.home / "applications", self.system / "applications", self.system / "icons/hicolor"):
             d.mkdir(parents=True)
-        # GdkPixbuf's glycin loaders (SVG among them) and the MIME database they
-        # sniff with are found through XDG_DATA_DIRS.
-        loaders = self.loaders = root / "loaders"
-        loaders.mkdir()
-        for name in ("glycin-loaders", "mime"):
-            if Path("/usr/share", name).is_dir():
-                (loaders / name).symlink_to(Path("/usr/share", name))
         self.env = {k: os.environ.get(k) for k in ("XDG_DATA_HOME", "XDG_DATA_DIRS", "XDG_CURRENT_DESKTOP", "XDG_CACHE_HOME")}
         os.environ["XDG_DATA_HOME"] = str(self.home)
         os.environ["XDG_CACHE_HOME"] = str(root / "cache")
-        os.environ["XDG_DATA_DIRS"] = f"{self.system}:{loaders}"
+        os.environ["XDG_DATA_DIRS"] = f"{self.system}:{LOADERS}"
         os.environ["XDG_CURRENT_DESKTOP"] = "Ada"
 
     def tearDown(self):
@@ -250,7 +259,7 @@ class Sync(Sandbox):
         copy = self.applied_copy()
         # As in a bare background service: the app's folder isn't in XDG_DATA_DIRS,
         # but it is one of the standard app folders.
-        os.environ["XDG_DATA_DIRS"] = str(self.loaders)
+        os.environ["XDG_DATA_DIRS"] = str(LOADERS)
         apps_mod.KNOWN_APP_DIRS = [str(self.system)]
         self.assertEqual(sync(), [])
         self.assertTrue(copy.exists())
@@ -602,3 +611,171 @@ class AppFolder(Sandbox):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def svg(body, width=64, height=64):
+    return f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">{body}</svg>'.encode()
+
+
+# A tile already, its corners rounder than the shared shape's.
+ROUND_TILE = svg('<rect width="64" height="64" rx="24" fill="#2a5bd7"/><circle cx="32" cy="32" r="10" fill="#fff"/>')
+# A badge of one colour.
+BADGE = svg('<circle cx="32" cy="32" r="32" fill="#e0103a"/><path d="M26 20 L46 32 L26 44 Z" fill="#fff"/>')
+# A badge whose edge changes colour round it: a logo, not a tile.
+PIE = svg('<path d="M32 32 L32 0 A32 32 0 0 1 64 32 Z" fill="#e33"/><path d="M32 32 L64 32 A32 32 0 0 1 32 64 Z" fill="#3a3"/>'
+          '<path d="M32 32 L32 64 A32 32 0 0 1 0 32 Z" fill="#33e"/><path d="M32 32 L0 32 A32 32 0 0 1 32 0 Z" fill="#ec3"/>')
+TRIANGLE = svg('<path d="M32 4 L60 58 L4 58 Z" fill="#f07818"/>')
+BANNER = svg('<rect width="64" height="32" fill="#0a8"/>', 64, 32)
+WHITE_STAR = svg('<path d="M32 4 L40 24 L62 24 L44 38 L50 60 L32 46 L14 60 L20 38 L2 24 L24 24 Z" fill="#fafafa"/>')
+
+
+class Shapes(unittest.TestCase):
+    def shape(self, data):
+        return shapes.analyze(sources.decode(data, shapes.DRAWN)[0])
+
+    def pixel(self, pixbuf, x, y):
+        data, i = pixbuf.get_pixels(), y * pixbuf.get_rowstride() + x * 4
+        return tuple(data[i:i + 4])
+
+    def render(self, data, **kw):
+        with tempfile.NamedTemporaryFile(suffix=".svg") as file:
+            file.write(data)
+            file.flush()
+            return shapes.render(file.name, **kw)
+
+    def test_tiles_are_told_from_other_shapes(self):
+        self.assertEqual(self.shape(ROUND_TILE).kind, shapes.FILL)
+        self.assertEqual(self.shape(BADGE).kind, shapes.FILL)
+        self.assertEqual(self.shape(PIE).kind, shapes.SET)
+        self.assertEqual(self.shape(TRIANGLE).kind, shapes.SET)
+        self.assertEqual(self.shape(BANNER).kind, shapes.SET)
+
+    def test_a_tile_is_cut_to_the_shape_and_its_corners_filled(self):
+        pic = self.render(ROUND_TILE)
+        self.assertEqual((pic.get_width(), pic.get_height()), (shapes.SIZE, shapes.SIZE))
+        self.assertEqual(self.pixel(pic, 0, 0)[3], 0)
+        o = shapes.outline()
+        # Inside the shared outline where the original's rounder corner left a gap: filled in its blue.
+        r, g, b, a = self.pixel(pic, o.offset + round(o.side * 0.06), o.offset + round(o.side * 0.12))
+        self.assertEqual(a, 255)
+        self.assertTrue(b > 180 and r < 80, (r, g, b))
+        self.assertEqual(self.pixel(pic, shapes.SIZE // 2, shapes.SIZE // 2)[:3], (255, 255, 255))
+
+    def test_another_shape_is_set_on_a_tile_in_its_own_colour(self):
+        pic = self.render(TRIANGLE)
+        o = shapes.outline()
+        r, g, b, a = self.pixel(pic, o.offset + round(o.side * 0.1), o.offset + round(o.side * 0.5))
+        self.assertEqual(a, 255)
+        self.assertTrue(r > g > b > 200, (r, g, b))  # a pale wash of the orange
+        r, g, b, _ = self.pixel(self.render(TRIANGLE, plain=True), o.offset + round(o.side * 0.1), o.offset + round(o.side * 0.5))
+        self.assertTrue(max(r, g, b) - min(r, g, b) < 8, (r, g, b))  # plain: grey
+        # A white picture would vanish on a pale tile: it gets a dark one.
+        r, g, b, _ = self.pixel(self.render(WHITE_STAR), o.offset + round(o.side * 0.1), o.offset + round(o.side * 0.1))
+        self.assertLess(max(r, g, b), 100)
+
+    def test_the_shadow_falls_below_the_tile(self):
+        pic, o = self.render(TRIANGLE), shapes.outline()
+        middle = shapes.SIZE // 2
+        below = self.pixel(pic, middle, o.offset + o.side + 2)[3]
+        above = self.pixel(pic, middle, o.offset - 3)[3]
+        self.assertGreater(below, above)
+
+
+class SameShapePack(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.config = Path(self.tmp.name) / "config"
+        self.env["XDG_CONFIG_HOME"] = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = str(self.config)
+        self.ada_icons = Path(self.tmp.name) / "ada-icons"
+        self.ada_icons.mkdir()
+        self.real_ada_icons, shapes.ADA_ICONS = shapes.ADA_ICONS, self.ada_icons
+        self.picture(TRIANGLE, "triangle.svg")
+        self.system_entry("org.example.Tri.desktop", entry("Triangle", icon=str(self.home / "triangle.svg")))
+        self.system_entry("no-icon.desktop", entry("Nothing"))
+        (self.ada_icons / "ada-thing.svg").write_bytes(ROUND_TILE)
+        self.system_entry("ada-thing.desktop", entry("Ada Thing", icon="ada-thing"))
+        self.long_id = "ada-windows-" + "9e44" * 16 + "-" + "b608" * 16
+        self.user_entry(f"{self.long_id}.desktop", entry("Windows App", icon=str(self.home / "triangle.svg")))
+
+    def tearDown(self):
+        shapes.ADA_ICONS = self.real_ada_icons
+        super().tearDown()
+
+    def picture(self, data, name):
+        (self.home / name).write_bytes(data)
+
+    def look(self, icons=None):
+        (self.config / "ada").mkdir(parents=True, exist_ok=True)
+        (self.config / "ada/look.ini").write_text("[Look]\nActive=mine\n")
+        folder = self.home / "ada/looks/mine"
+        folder.mkdir(parents=True, exist_ok=True)
+        look = {"name": "Mine", "style": {"corners": 1.04}}
+        if icons is not None:
+            look["icons"] = icons
+        (folder / "look.json").write_text(json.dumps(look, indent=4, sort_keys=True) + "\n")
+        return folder / "look.json"
+
+    def test_every_app_gets_a_picture_named_by_its_id_in_adas_packs(self):
+        report = shapes.build()
+        pack = self.home / "ada/icon-packs" / shapes.PACK_ID
+        self.assertEqual(report.folder, pack)
+        self.assertEqual(json.loads((pack / "pack.json").read_text())["name"], "Same shape")
+        made = sorted(p.name for p in (pack / "icons").iterdir())
+        self.assertEqual(made, sorted(["org.example.Tri.png", "ada-thing.png", f"{self.long_id}.png"]))
+        self.assertEqual(report.left_out, [("Nothing", "no icon")])
+
+    def test_a_refresh_keeps_what_hasnt_changed_and_follows_what_has(self):
+        shapes.build()
+        pack = self.home / "ada/icon-packs" / shapes.PACK_ID / "icons"
+        report = shapes.refresh()
+        self.assertEqual(report.made, [])
+        self.assertEqual(len(report.kept), 3)
+
+        self.picture(BADGE, "triangle.svg")  # the app's icon changed
+        os.utime(self.home / "triangle.svg", ns=(1, 1))
+        (self.system / "applications/ada-thing.desktop").unlink()  # uninstalled
+        report = shapes.refresh()
+        self.assertEqual(sorted(report.made), ["Triangle", "Windows App"])
+        self.assertFalse((pack / "ada-thing.png").exists())
+
+    def test_without_a_pack_refresh_does_nothing(self):
+        self.assertIsNone(shapes.refresh())
+
+    def test_wearing_and_taking_off_puts_back_what_the_look_wore(self):
+        before = {"fallback": "tint", "pack": "other"}
+        path = self.look(before)
+        original = path.read_text()
+        shapes.build()
+        shapes.wear()
+        self.assertEqual(json.loads(path.read_text())["icons"], shapes.PACK_ID)
+        self.assertTrue(shapes.worn())
+        shapes.wear()  # twice: still remembers the first
+        shapes.take_off()
+        self.assertFalse(shapes.worn())
+        self.assertEqual(path.read_text(), original)
+
+        path = self.look()
+        shapes.wear()
+        shapes.take_off()
+        self.assertNotIn("icons", json.loads(path.read_text()))
+
+    def test_a_built_in_look_is_left_to_settings(self):
+        (self.config / "ada").mkdir(parents=True)
+        (self.config / "ada/look.ini").write_text("[Look]\nActive=ada-default\n")
+        with self.assertRaises(ValueError):
+            shapes.wear()
+        self.assertFalse(shapes.worn())
+
+    def test_the_command_wears_it_on_ada_and_only_writes_a_folder_elsewhere(self):
+        path = self.look()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["shape"]), 0)
+            self.assertEqual(json.loads(path.read_text())["icons"], shapes.PACK_ID)
+            self.assertEqual(main(["shape", "--off"]), 0)
+            self.assertNotIn("icons", json.loads(path.read_text()))
+
+            os.environ["XDG_CURRENT_DESKTOP"] = "GNOME"
+            self.assertEqual(main(["shape"]), 0)
+        self.assertNotIn("icons", json.loads(path.read_text()))
+        self.assertTrue((self.home / "iconfetch/same-shape/icons/org.example.Tri.png").is_file())

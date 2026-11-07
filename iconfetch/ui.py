@@ -14,8 +14,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from . import APP_ID
-from .apps import GENERIC, LOWRES, MISSING, App, installed_apps
+from . import APP_ID, shapes
+from .apps import GENERIC, LOWRES, MISSING, App, installed_apps, on_ada
 from .install import REMOVED, RESTORED, UPDATED, apply, revert, suggested, sync
 from .sources import Candidate, Finder, to_png
 
@@ -220,6 +220,12 @@ class Window(Adw.ApplicationWindow):
         self.apply_button.add_css_class("suggested-action")
         self.apply_button.connect("clicked", lambda *_: self.apply_selected())
         header.pack_end(self.apply_button)
+        if on_ada():
+            # Every app's icon on one tile: a pack Ada's look wears (shapes.py).
+            menu = Gio.Menu()
+            menu.append("Same Shape Icons", "win.same-shape")
+            menu.append("Look Again Online", "win.refresh")
+            header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Main menu"))
 
         self.progress = Adw.StatusPage(title="Reading your apps", child=_spinner())
         self.toasts = Adw.ToastOverlay()
@@ -236,6 +242,12 @@ class Window(Adw.ApplicationWindow):
         undo.connect("activate", lambda _action, ids: self.undo(ids.unpack()))
         self.add_action(undo)
         application.set_accels_for_action("win.refresh", ["<Control>r", "F5"])
+        self.shape_action = Gio.SimpleAction.new_stateful("same-shape", None, GLib.Variant("b", on_ada() and shapes.worn()))
+        self.shape_action.connect("change-state", lambda _action, value: self.set_same_shape(value.get_boolean()))
+        self.add_action(self.shape_action)
+        shape_off = Gio.SimpleAction.new("same-shape-off", None)
+        shape_off.connect("activate", lambda *_: self.set_same_shape(False))
+        self.add_action(shape_off)
 
     # --- Looking -------------------------------------------------------------
 
@@ -261,6 +273,7 @@ class Window(Adw.ApplicationWindow):
         except (OSError, GLib.Error) as error:
             print(f"iconfetch: couldn't refresh its copies: {error}", file=sys.stderr)
             synced = []
+        self._reshape()
         apps = installed_apps()
         GLib.idle_add(self._listed, apps)
         found: dict[str, list[Candidate]] = {}
@@ -419,6 +432,8 @@ class Window(Adw.ApplicationWindow):
             except (OSError, GLib.Error) as error:
                 failed.append(f"{row.app.name}: {getattr(error, 'message', error)}")
         self.show_apps()
+        if done:
+            threading.Thread(target=self._reshape, daemon=True).start()
         if failed:
             print("\n".join(failed), file=sys.stderr)
             self.toast(f"Couldn't change {len(failed)} app{'s' * (len(failed) != 1)}: {failed[0]}")
@@ -434,6 +449,59 @@ class Window(Adw.ApplicationWindow):
                 except (OSError, GLib.Error) as error:
                     self.toast(f"Couldn't undo {app.name}: {getattr(error, 'message', error)}")
         self.show_apps()
+        threading.Thread(target=self._reshape, daemon=True).start()
+
+    # --- One shape -----------------------------------------------------------
+
+    @staticmethod
+    def _reshape() -> None:
+        """Bring the same-shape pack up to date with the icons apps show now, if there is one."""
+        try:
+            shapes.refresh()
+        except (OSError, ValueError, GLib.Error):
+            traceback.print_exc()
+
+    def set_same_shape(self, on: bool) -> None:
+        """Make the pack and have Ada's look wear it, or put back the icons it wore before."""
+        if not on:
+            try:
+                shapes.take_off()
+            except (OSError, ValueError) as error:
+                self.toast(f"Couldn't change Ada's look: {error}")
+                return
+            self.shape_action.set_state(GLib.Variant("b", False))
+            self.toast("Apps show the icons Ada's look wore before")
+            return
+        self.shape_action.set_enabled(False)
+        self.title_widget.set_subtitle("Giving every icon one shape…")
+
+        def progress(done: int, total: int) -> None:
+            GLib.idle_add(self.title_widget.set_subtitle, f"Shaping icon {done} of {total}…")
+
+        def work() -> None:
+            try:
+                report = shapes.build(progress=progress)
+                shapes.wear()
+                error = None
+            except (OSError, ValueError, GLib.Error) as problem:
+                report, error = None, str(getattr(problem, "message", problem))
+            GLib.idle_add(self._shaped, report, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _shaped(self, report: Optional[shapes.Report], error: Optional[str]) -> bool:
+        self.shape_action.set_enabled(True)
+        self.title_widget.set_subtitle("Looking for icons…" if self.busy else "")
+        if error:
+            self.toast(error)
+        else:
+            self.shape_action.set_state(GLib.Variant("b", True))
+            shaped = len(report.made) + len(report.kept)
+            toast = Adw.Toast(title=f"{shaped} icons in one shape", timeout=6)
+            toast.set_button_label("Undo")
+            toast.set_action_name("win.same-shape-off")
+            self.toasts.add_toast(toast)
+        return False
 
     def toast(self, text: str, undo: Optional[list[str]] = None) -> None:
         toast = Adw.Toast(title=GLib.markup_escape_text(text), timeout=6)

@@ -18,10 +18,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 HOME = tempfile.mkdtemp(prefix="iconfetch-smoke-")
 os.environ["XDG_DATA_HOME"] = HOME
+# On Ada, with a look of the person's own: the Same Shape Icons switch shows.
+os.environ["XDG_CONFIG_HOME"] = os.path.join(HOME, "config")
+os.environ["XDG_CURRENT_DESKTOP"] = "Ada"
 
 from gi.repository import Gio, GLib  # noqa: E402
 
-from iconfetch import ui  # noqa: E402
+from iconfetch import shapes, ui  # noqa: E402
 from iconfetch.apps import installed_apps  # noqa: E402
 from iconfetch.sources import Candidate, to_png  # noqa: E402
 
@@ -70,6 +73,15 @@ def main() -> int:
         )
     ui.installed_apps = lambda: [a for a in installed_apps() if a.id.startswith("smoke-")]
     ui.Finder = FakeFinder
+    picture = Path(HOME, "shape-me.svg")
+    picture.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="7" fill="#e63"/></svg>')
+    (apps_dir / "shape-me.desktop").write_text(f"[Desktop Entry]\nType=Application\nName=Shape Me\nExec=true\nIcon={picture}\n")
+    shapes.installed_apps = lambda **kw: [a for a in installed_apps(**kw) if a.id.startswith(("smoke-", "shape-"))]
+    look = Path(HOME, "ada/looks/smoke/look.json")
+    look.parent.mkdir(parents=True)
+    look.write_text('{\n    "name": "Smoke"\n}\n')
+    Path(HOME, "config/ada").mkdir(parents=True)
+    Path(HOME, "config/ada/look.ini").write_text("[Look]\nActive=smoke\n")
 
     application = ui.Application()
     application.set_flags(Gio.ApplicationFlags.NON_UNIQUE)
@@ -122,6 +134,18 @@ def main() -> int:
             # The way the toast's Undo button does it.
             window.activate_action("win.undo", GLib.Variant("as", ["smoke-missing.desktop"]))
             check("Icon=smoke-no-such-icon" in (apps_dir / "smoke-missing.desktop").read_text(), "Undo restores it")
+            # The menu's check item toggles the action.
+            window.activate_action("win.same-shape", None)
+            for _ in range(40):
+                if window.shape_action.get_state().get_boolean():
+                    break
+                yield
+            check('"icons": "iconfetch-same-shape"' in look.read_text(), "Same Shape Icons has Ada's look wear the pack")
+            check(Path(HOME, "ada/icon-packs/iconfetch-same-shape/icons/shape-me.png").is_file(), "the pack has the app's icon")
+            # The way the toast's Undo button does it.
+            window.activate_action("win.same-shape-off", None)
+            check("icons" not in look.read_text() and not window.shape_action.get_state().get_boolean(),
+                  "Undo puts the look back")
             finish(0)
         except Exception:
             traceback.print_exc()
