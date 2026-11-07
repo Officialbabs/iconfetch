@@ -221,9 +221,15 @@ class Window(Adw.ApplicationWindow):
         self.apply_button.connect("clicked", lambda *_: self.apply_selected())
         header.pack_end(self.apply_button)
         if on_ada():
-            # Every app's icon on one tile: a pack Ada's look wears (shapes.py).
+            # Every app's icon in one shape: a pack Ada's look wears (shapes.py).
+            forms = Gio.Menu()
+            for name, form in shapes.FORMS.items():
+                forms.append(form.title, f"win.icon-form::{name}")
+            shaping = Gio.Menu()
+            shaping.append("Same Shape Icons", "win.same-shape")
+            shaping.append_submenu("Icon Shape", forms)
             menu = Gio.Menu()
-            menu.append("Same Shape Icons", "win.same-shape")
+            menu.append_section(None, shaping)
             menu.append("Look Again Online", "win.refresh")
             header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Main menu"))
 
@@ -248,6 +254,11 @@ class Window(Adw.ApplicationWindow):
         shape_off = Gio.SimpleAction.new("same-shape-off", None)
         shape_off.connect("activate", lambda *_: self.set_same_shape(False))
         self.add_action(shape_off)
+        # Picking a shape puts it on.
+        self.form_action = Gio.SimpleAction.new_stateful("icon-form", GLib.VariantType.new("s"),
+                                                         GLib.Variant("s", shapes.last_form()))
+        self.form_action.connect("change-state", lambda _action, value: self.set_same_shape(True, value.get_string()))
+        self.add_action(self.form_action)
 
     # --- Looking -------------------------------------------------------------
 
@@ -461,8 +472,9 @@ class Window(Adw.ApplicationWindow):
         except (OSError, ValueError, GLib.Error):
             traceback.print_exc()
 
-    def set_same_shape(self, on: bool) -> None:
-        """Make the pack and have Ada's look wear it, or put back the icons it wore before."""
+    def set_same_shape(self, on: bool, form: Optional[str] = None) -> None:
+        """Make the pack (in `form`, or the shape picked before) and have Ada's look wear it, or put back
+        the icons it wore before."""
         if not on:
             try:
                 shapes.take_off()
@@ -472,7 +484,9 @@ class Window(Adw.ApplicationWindow):
             self.shape_action.set_state(GLib.Variant("b", False))
             self.toast("Apps show the icons Ada's look wore before")
             return
+        form = form or self.form_action.get_state().get_string()
         self.shape_action.set_enabled(False)
+        self.form_action.set_enabled(False)
         self.title_widget.set_subtitle("Giving every icon one shape…")
 
         def progress(done: int, total: int) -> None:
@@ -480,24 +494,27 @@ class Window(Adw.ApplicationWindow):
 
         def work() -> None:
             try:
-                report = shapes.build(progress=progress)
+                report = shapes.build(progress=progress, form=form)
                 shapes.wear()
                 error = None
             except (OSError, ValueError, GLib.Error) as problem:
                 report, error = None, str(getattr(problem, "message", problem))
-            GLib.idle_add(self._shaped, report, error)
+            GLib.idle_add(self._shaped, report, error, form)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _shaped(self, report: Optional[shapes.Report], error: Optional[str]) -> bool:
+    def _shaped(self, report: Optional[shapes.Report], error: Optional[str], form: str) -> bool:
         self.shape_action.set_enabled(True)
+        self.form_action.set_enabled(True)
         self.title_widget.set_subtitle("Looking for icons…" if self.busy else "")
         if error:
             self.toast(error)
         else:
             self.shape_action.set_state(GLib.Variant("b", True))
-            shaped = len(report.made) + len(report.kept)
-            toast = Adw.Toast(title=f"{shaped} icons in one shape", timeout=6)
+            self.form_action.set_state(GLib.Variant("s", form))
+            title = shapes.FORMS[form].title
+            toast = Adw.Toast(title=f"{report.shaped} icons brought to the {title} shape, {len(report.as_is)} already in it",
+                              timeout=6)
             toast.set_button_label("Undo")
             toast.set_action_name("win.same-shape-off")
             self.toasts.add_toast(toast)

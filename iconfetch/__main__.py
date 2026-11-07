@@ -5,7 +5,8 @@
   iconfetch apply [ID…]     apply the suggested icons (or the best find for each ID)
   iconfetch revert [ID…]    put back the original icons (all of IconFetch's changes without IDs)
   iconfetch refresh         catch up with app updates and removals (runs by itself after installs)
-  iconfetch shape           give every app's icon one shape: an icon pack Ada's look wears (--off: as before)
+  iconfetch shape [SHAPE]   give every app's icon one shape (ada, macos or circle): an icon pack Ada's look
+                            wears (--off: as before)
 """
 
 from __future__ import annotations
@@ -113,11 +114,12 @@ def cmd_shape(args) -> int:
         shapes.take_off()
         print("Ada's look shows the icons it wore before.")
         return 0
-    report = shapes.build(folder=args.out, plain=args.plain)
+    report = shapes.build(folder=args.out, plain=args.plain, form=args.form)
     for name, why in report.left_out:
         print(f"{name}: left out ({why})", file=sys.stderr)
-    shaped = len(report.made) + len(report.kept)
-    print(f"{shaped} icon{'s' * (shaped != 1)} in one shape, in {report.folder}")
+    title = shapes.FORMS[shapes.last_form()].title
+    print(f"{report.shaped} icon{'s' * (report.shaped != 1)} brought to the {title} shape, in {report.folder}; "
+          f"{len(report.as_is)} already had it and are left as they are")
     if args.out or args.no_wear or not on_ada():
         return 0
     try:
@@ -147,6 +149,9 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--fresh", action="store_true", help="look online again instead of using finds from the last week")
         sub.set_defaults(handler=handler)
     shape = commands.add_parser("shape", help="give every app's icon one shape (an Ada icon pack)")
+    shape.add_argument("form", nargs="?", choices=["ada", "macos", "circle"], metavar="SHAPE",
+                       help="ada (Ada's rounded square), macos (Apple's, with its shadow) or circle; "
+                            "the last one used when left out")
     shape.add_argument("--off", action="store_true", help="put back the icons Ada's look wore before")
     shape.add_argument("--plain", action="store_true", help="set odd shapes on grey tiles, not tiles in their own colour")
     shape.add_argument("--no-wear", action="store_true", help="make the pack, but leave Ada's look as it is")

@@ -42,7 +42,7 @@
   <releases>
     <release version="1.4.0" date="2026-11-07">
       <description>
-        <p>Same Shape Icons: on the Ada desktop, every app's own icon on one rounded tile, so the dock reads as one set. Kept up to date as apps change, and undone in one step.</p>
+        <p>Same Shape Icons: on the Ada desktop, every app's own icon in one shape (Ada's rounded square, Apple's, or a circle), so the dock reads as one set. Icons already in the shape are left as they are; the rest are resized, cut to the shape, or set on a tile in their own colour. Kept up to date as apps change, and undone in one step.</p>
       </description>
     </release>
     <release version="1.3.1" date="2026-10-20">

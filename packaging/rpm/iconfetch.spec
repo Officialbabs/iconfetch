@@ -44,7 +44,7 @@ sh install.sh --prefix=%{_prefix} --destdir=%{buildroot} --no-deps
 
 %changelog
 * Sat Nov 07 2026 Oluwasegun Babalola <133790822+Officialbabs@users.noreply.github.com> - 1.4.0-1
-- Same Shape Icons: every app's icon on one rounded tile, as an Ada icon pack
+- Same Shape Icons: every app's icon in one shape (Ada, macOS or circle), as an Ada icon pack
 * Tue Oct 20 2026 Oluwasegun Babalola <133790822+Officialbabs@users.noreply.github.com> - 1.3.1-1
 - Arrows and found icons line up on every row
 * Tue Oct 20 2026 Oluwasegun Babalola <133790822+Officialbabs@users.noreply.github.com> - 1.3.0-1

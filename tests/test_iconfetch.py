@@ -617,21 +617,29 @@ def svg(body, width=64, height=64):
     return f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">{body}</svg>'.encode()
 
 
+# Already in Ada's shape and size (82% of the picture, rounded like it).
+IN_SHAPE = svg('<rect x="5.76" y="5.76" width="52.48" height="52.48" rx="11" fill="#7a3"/>')
+# In Ada's shape, but filling the whole picture.
+TOO_BIG = svg('<rect width="64" height="64" rx="13.4" fill="#fff"/><path d="M20 18 L48 32 L20 46 Z" fill="#63c"/>')
 # A tile already, its corners rounder than the shared shape's.
 ROUND_TILE = svg('<rect width="64" height="64" rx="24" fill="#2a5bd7"/><circle cx="32" cy="32" r="10" fill="#fff"/>')
-# A badge of one colour.
+# A badge of one colour, filling the picture.
 BADGE = svg('<circle cx="32" cy="32" r="32" fill="#e0103a"/><path d="M26 20 L46 32 L26 44 Z" fill="#fff"/>')
+# A badge at the circle shape's size.
+ROUND_IN_SHAPE = svg('<circle cx="32" cy="32" r="28.8" fill="#e0103a"/>')
 # A badge whose edge changes colour round it: a logo, not a tile.
 PIE = svg('<path d="M32 32 L32 0 A32 32 0 0 1 64 32 Z" fill="#e33"/><path d="M32 32 L64 32 A32 32 0 0 1 32 64 Z" fill="#3a3"/>'
           '<path d="M32 32 L32 64 A32 32 0 0 1 0 32 Z" fill="#33e"/><path d="M32 32 L0 32 A32 32 0 0 1 32 0 Z" fill="#ec3"/>')
 TRIANGLE = svg('<path d="M32 4 L60 58 L4 58 Z" fill="#f07818"/>')
+# Mostly blue, with a red dot: the blue is its colour.
+BLUE_TRIANGLE = svg('<path d="M32 4 L60 58 L4 58 Z" fill="#2563eb"/><circle cx="32" cy="44" r="4" fill="#e11"/>')
 BANNER = svg('<rect width="64" height="32" fill="#0a8"/>', 64, 32)
 WHITE_STAR = svg('<path d="M32 4 L40 24 L62 24 L44 38 L50 60 L32 46 L14 60 L20 38 L2 24 L24 24 Z" fill="#fafafa"/>')
 
 
 class Shapes(unittest.TestCase):
-    def shape(self, data):
-        return shapes.analyze(sources.decode(data, shapes.DRAWN)[0])
+    def shape(self, data, form=shapes.DEFAULT_FORM):
+        return shapes.analyze(sources.decode(data, shapes.DRAWN)[0], form)
 
     def pixel(self, pixbuf, x, y):
         data, i = pixbuf.get_pixels(), y * pixbuf.get_rowstride() + x * 4
@@ -643,12 +651,32 @@ class Shapes(unittest.TestCase):
             file.flush()
             return shapes.render(file.name, **kw)
 
-    def test_tiles_are_told_from_other_shapes(self):
-        self.assertEqual(self.shape(ROUND_TILE).kind, shapes.FILL)
-        self.assertEqual(self.shape(BADGE).kind, shapes.FILL)
+    def tile_colour(self, data, **kw):
+        o = shapes.outline(kw.get("form", shapes.DEFAULT_FORM))
+        return self.pixel(self.render(data, **kw), o.offset + round(o.side * 0.1), o.offset + round(o.side * 0.5))
+
+    def test_each_icon_gets_only_what_it_needs_for_the_shape(self):
+        self.assertEqual(self.shape(IN_SHAPE).kind, shapes.KEEP)
+        self.assertEqual(self.shape(TOO_BIG).kind, shapes.RESIZE)
+        self.assertEqual(self.shape(ROUND_TILE).kind, shapes.CUT)
+        self.assertEqual(self.shape(BADGE).kind, shapes.CUT)
         self.assertEqual(self.shape(PIE).kind, shapes.SET)
         self.assertEqual(self.shape(TRIANGLE).kind, shapes.SET)
         self.assertEqual(self.shape(BANNER).kind, shapes.SET)
+        # The same icons, as circles.
+        self.assertEqual(self.shape(ROUND_IN_SHAPE, "circle").kind, shapes.KEEP)
+        self.assertEqual(self.shape(BADGE, "circle").kind, shapes.RESIZE)
+        self.assertEqual(self.shape(IN_SHAPE, "circle").kind, shapes.CUT)
+        # Ada's rounded square and Apple's are near enough at this size.
+        self.assertEqual(self.shape(IN_SHAPE, "macos").kind, shapes.KEEP)
+
+    def test_an_icon_in_the_shape_is_left_alone_and_one_too_big_only_resized(self):
+        self.assertIsNone(self.render(IN_SHAPE))
+        pic, o = self.render(TOO_BIG), shapes.outline()
+        self.assertEqual(self.pixel(pic, 0, 0)[3], 0)
+        middle = shapes.SIZE // 2
+        self.assertEqual(self.pixel(pic, middle, o.offset + 2)[3], 255)  # its top edge where the tile's is
+        self.assertEqual(self.pixel(pic, middle, o.offset - 2)[3], 0)
 
     def test_a_tile_is_cut_to_the_shape_and_its_corners_filled(self):
         pic = self.render(ROUND_TILE)
@@ -662,23 +690,29 @@ class Shapes(unittest.TestCase):
         self.assertEqual(self.pixel(pic, shapes.SIZE // 2, shapes.SIZE // 2)[:3], (255, 255, 255))
 
     def test_another_shape_is_set_on_a_tile_in_its_own_colour(self):
-        pic = self.render(TRIANGLE)
-        o = shapes.outline()
-        r, g, b, a = self.pixel(pic, o.offset + round(o.side * 0.1), o.offset + round(o.side * 0.5))
+        r, g, b, a = self.tile_colour(TRIANGLE)
         self.assertEqual(a, 255)
-        self.assertTrue(r > g > b > 200, (r, g, b))  # a pale wash of the orange
-        r, g, b, _ = self.pixel(self.render(TRIANGLE, plain=True), o.offset + round(o.side * 0.1), o.offset + round(o.side * 0.5))
+        self.assertTrue(r > g > b > 200, (r, g, b))  # a light orange
+        r, g, b, _ = self.tile_colour(BLUE_TRIANGLE)
+        self.assertTrue(b > g > r and b > 230, (r, g, b))  # a light blue: the main colour, not the dot's
+        r, g, b, _ = self.tile_colour(TRIANGLE, plain=True)
         self.assertTrue(max(r, g, b) - min(r, g, b) < 8, (r, g, b))  # plain: grey
-        # A white picture would vanish on a pale tile: it gets a dark one.
+        # A white picture would vanish on a light tile: it gets a deep one.
+        o = shapes.outline()
         r, g, b, _ = self.pixel(self.render(WHITE_STAR), o.offset + round(o.side * 0.1), o.offset + round(o.side * 0.1))
         self.assertLess(max(r, g, b), 100)
 
-    def test_the_shadow_falls_below_the_tile(self):
-        pic, o = self.render(TRIANGLE), shapes.outline()
+    def test_macos_has_its_shadow_below_and_ada_none(self):
         middle = shapes.SIZE // 2
-        below = self.pixel(pic, middle, o.offset + o.side + 2)[3]
-        above = self.pixel(pic, middle, o.offset - 3)[3]
-        self.assertGreater(below, above)
+        for form, shadowed in (("macos", True), ("ada", False)):
+            o = shapes.outline(form)
+            below = self.pixel(self.render(TRIANGLE, form=form), middle, o.offset + o.side + 2)[3]
+            self.assertEqual(below > 0, shadowed, form)
+
+    def test_a_circle_is_round(self):
+        pic, o = self.render(TRIANGLE, form="circle"), shapes.outline("circle")
+        self.assertEqual(self.pixel(pic, o.offset + 4, o.offset + 4)[3], 0)  # the box's corner: outside
+        self.assertEqual(self.pixel(pic, o.offset + 2, shapes.SIZE // 2)[3], 255)  # its left edge: inside
 
 
 class SameShapePack(Sandbox):
@@ -697,6 +731,8 @@ class SameShapePack(Sandbox):
         self.system_entry("ada-thing.desktop", entry("Ada Thing", icon="ada-thing"))
         self.long_id = "ada-windows-" + "9e44" * 16 + "-" + "b608" * 16
         self.user_entry(f"{self.long_id}.desktop", entry("Windows App", icon=str(self.home / "triangle.svg")))
+        self.picture(IN_SHAPE, "ready.svg")
+        self.system_entry("org.example.Ready.desktop", entry("Ready", icon=str(self.home / "ready.svg")))
 
     def tearDown(self):
         shapes.ADA_ICONS = self.real_ada_icons
@@ -716,21 +752,36 @@ class SameShapePack(Sandbox):
         (folder / "look.json").write_text(json.dumps(look, indent=4, sort_keys=True) + "\n")
         return folder / "look.json"
 
-    def test_every_app_gets_a_picture_named_by_its_id_in_adas_packs(self):
+    def test_apps_out_of_shape_get_a_picture_named_by_their_id_in_adas_packs(self):
         report = shapes.build()
         pack = self.home / "ada/icon-packs" / shapes.PACK_ID
         self.assertEqual(report.folder, pack)
         self.assertEqual(json.loads((pack / "pack.json").read_text())["name"], "Same shape")
         made = sorted(p.name for p in (pack / "icons").iterdir())
         self.assertEqual(made, sorted(["org.example.Tri.png", "ada-thing.png", f"{self.long_id}.png"]))
+        # Already in the shape: left out, so Ada shows its own icon.
+        self.assertEqual(report.as_is, ["Ready"])
         self.assertEqual(report.left_out, [("Nothing", "no icon")])
+
+    def test_another_shape_remakes_the_pack_in_it_and_refreshes_keep_it(self):
+        shapes.build()
+        report = shapes.build(form="circle")
+        pack = self.home / "ada/icon-packs" / shapes.PACK_ID
+        self.assertTrue((pack / "icons/org.example.Ready.png").is_file())  # a rounded square: cut to a circle
+        self.assertEqual(report.as_is, [])
+        self.assertIn("circle", json.loads((pack / "pack.json").read_text())["about"])
+        self.assertEqual(shapes.last_form(), "circle")
+        self.assertEqual(shapes.refresh().made, [])
+        with self.assertRaises(ValueError):
+            shapes.build(form="hexagon")
 
     def test_a_refresh_keeps_what_hasnt_changed_and_follows_what_has(self):
         shapes.build()
         pack = self.home / "ada/icon-packs" / shapes.PACK_ID / "icons"
         report = shapes.refresh()
         self.assertEqual(report.made, [])
-        self.assertEqual(len(report.kept), 3)
+        self.assertEqual(len(report.unchanged), 3)
+        self.assertEqual(report.as_is, ["Ready"])
 
         self.picture(BADGE, "triangle.svg")  # the app's icon changed
         os.utime(self.home / "triangle.svg", ns=(1, 1))
@@ -738,6 +789,12 @@ class SameShapePack(Sandbox):
         report = shapes.refresh()
         self.assertEqual(sorted(report.made), ["Triangle", "Windows App"])
         self.assertFalse((pack / "ada-thing.png").exists())
+
+        self.picture(IN_SHAPE, "triangle.svg")  # now in the shape: its picture goes
+        os.utime(self.home / "triangle.svg", ns=(2, 2))
+        report = shapes.refresh()
+        self.assertEqual(sorted(report.as_is), ["Ready", "Triangle", "Windows App"])
+        self.assertEqual(list(pack.iterdir()), [])
 
     def test_without_a_pack_refresh_does_nothing(self):
         self.assertIsNone(shapes.refresh())
@@ -775,7 +832,11 @@ class SameShapePack(Sandbox):
             self.assertEqual(main(["shape", "--off"]), 0)
             self.assertNotIn("icons", json.loads(path.read_text()))
 
+            self.assertEqual(main(["shape", "macos"]), 0)
+            self.assertEqual(shapes.last_form(), "macos")
+
             os.environ["XDG_CURRENT_DESKTOP"] = "GNOME"
+            self.assertEqual(main(["shape", "--off"]), 0)
             self.assertEqual(main(["shape"]), 0)
         self.assertNotIn("icons", json.loads(path.read_text()))
         self.assertTrue((self.home / "iconfetch/same-shape/icons/org.example.Tri.png").is_file())

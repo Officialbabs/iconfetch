@@ -142,6 +142,14 @@ def main() -> int:
                 yield
             check('"icons": "iconfetch-same-shape"' in look.read_text(), "Same Shape Icons has Ada's look wear the pack")
             check(Path(HOME, "ada/icon-packs/iconfetch-same-shape/icons/shape-me.png").is_file(), "the pack has the app's icon")
+            # The Icon Shape menu's radio items.
+            window.activate_action("win.icon-form", GLib.Variant("s", "circle"))
+            for _ in range(40):
+                if window.form_action.get_state().get_string() == "circle" and window.form_action.get_enabled():
+                    break
+                yield
+            about = Path(HOME, "ada/icon-packs/iconfetch-same-shape/pack.json").read_text()
+            check("circle" in about and window.shape_action.get_state().get_boolean(), "picking Circle remakes the pack as circles")
             # The way the toast's Undo button does it.
             window.activate_action("win.same-shape-off", None)
             check("icons" not in look.read_text() and not window.shape_action.get_state().get_boolean(),
