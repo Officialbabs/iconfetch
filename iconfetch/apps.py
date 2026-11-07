@@ -65,6 +65,10 @@ def data_home() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
 
 
+def config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
 def data_dirs() -> list[Path]:
     dirs = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
     return [data_home()] + [Path(d) for d in dirs.split(":") if d]
@@ -163,6 +167,10 @@ def _inside(path: Path, root: Path) -> bool:
 
 def _desktops() -> set[str]:
     return {d for d in os.environ.get("XDG_CURRENT_DESKTOP", "").split(":") if d}
+
+
+def on_ada() -> bool:
+    return "Ada" in _desktops()
 
 
 def _visible(kf: GLib.KeyFile) -> bool:
@@ -274,11 +282,11 @@ def program_present(exec_line: str, try_exec: str = "") -> Optional[bool]:
     return any(os.path.exists(os.path.join(folder, program)) for folder in path if folder)
 
 
-def installed_apps(include_ada: bool = False) -> list[App]:
+def installed_apps(include_ada: bool = False, include_self: bool = False) -> list[App]:
     index = IconIndex()
     apps = []
     for desktop_id, path in find_entries().items():
-        if desktop_id == f"{APP_ID}.desktop" or (not include_ada and ADA_OWN.match(desktop_id)):
+        if (not include_self and desktop_id == f"{APP_ID}.desktop") or (not include_ada and ADA_OWN.match(desktop_id)):
             continue
         app = load_entry(desktop_id, path)
         if app is None:
