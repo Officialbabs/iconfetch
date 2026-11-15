@@ -80,6 +80,16 @@ class Candidate:
 
 def to_png(data: bytes, size: int = SIZE) -> tuple[bytes, int]:
     """Decode any icon format GdkPixbuf reads (PNG, SVG, ICO…) into a square PNG of at most `size`."""
+    pixbuf, native = decode(data, size)
+    ok, png = pixbuf.save_to_bufferv("png", [], [])
+    if not ok:
+        raise ValueError("could not encode PNG")
+    return bytes(png), native
+
+
+def decode(data: bytes, size: int = SIZE) -> tuple[GdkPixbuf.Pixbuf, int]:
+    """Any icon format GdkPixbuf reads, as a square RGBA picture of at most `size` (vectors drawn at `size`),
+    and its own size: 0 for a vector."""
     if not data:
         raise ValueError("empty")
     loader = GdkPixbuf.PixbufLoader()
@@ -104,10 +114,7 @@ def to_png(data: bytes, size: int = SIZE) -> tuple[bytes, int]:
     if pixbuf is None:
         raise ValueError("not an image")
     pixbuf = _square(pixbuf.apply_embedded_orientation() or pixbuf)
-    ok, png = pixbuf.save_to_bufferv("png", [], [])
-    if not ok:
-        raise ValueError("could not encode PNG")
-    return bytes(png), native.get("size", min(pixbuf.get_width(), pixbuf.get_height()))
+    return pixbuf, native.get("size", min(pixbuf.get_width(), pixbuf.get_height()))
 
 
 def _square(pixbuf: GdkPixbuf.Pixbuf) -> GdkPixbuf.Pixbuf:
